@@ -9,7 +9,10 @@ import {
   Copy, 
   Check, 
   RefreshCw, 
-  AlertTriangle
+  AlertTriangle,
+  Trash2,
+  CheckSquare,
+  Square
 } from "lucide-react";
 
 export default function Withdrawals() {
@@ -18,7 +21,10 @@ export default function Withdrawals() {
   const [filter, setFilter] = useState("pending"); // default to pending for admin focus
   const [search, setSearch] = useState("");
   
-  // Modal state
+  // Selection state for bulk actions
+  const [selectedIds, setSelectedIds] = useState(new Set());
+
+  // Single Process Modal state (Approve / Reject)
   const [modal, setModal] = useState({
     open: false,
     request: null,
@@ -28,7 +34,26 @@ export default function Withdrawals() {
     error: null
   });
 
-  // Copy feedback
+  // Single Delete Modal state
+  const [deleteModal, setDeleteModal] = useState({
+    open: false,
+    request: null,
+    refundPending: true,
+    submitting: false,
+    error: null
+  });
+
+  // Bulk Action Modal state (Bulk Approve | Bulk Reject | Bulk Delete)
+  const [bulkModal, setBulkModal] = useState({
+    open: false,
+    action: "delete", // 'delete' | 'approve' | 'reject'
+    refundPending: true,
+    notes: "",
+    submitting: false,
+    error: null
+  });
+
+  // Copy feedback & toast
   const [copiedId, setCopiedId] = useState(null);
   const [toast, setToast] = useState(null);
 
@@ -39,7 +64,10 @@ export default function Withdrawals() {
   const fetchWithdrawals = () => {
     setLoading(true);
     api.getWithdrawals()
-      .then(res => setWithdrawals(Array.isArray(res) ? res : []))
+      .then(res => {
+        setWithdrawals(Array.isArray(res) ? res : []);
+        setSelectedIds(new Set()); // Reset selection on refresh
+      })
       .catch(err => {
         console.error("Failed to load withdrawals:", err);
         showToast("error", err.message || "Failed to load withdrawals");
@@ -59,7 +87,25 @@ export default function Withdrawals() {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  // Open modal for approving or rejecting
+  // ─── Selection Logic ────────────────────────────────────────────────────────
+  const handleToggleSelect = (id) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleToggleSelectAll = () => {
+    if (selectedIds.size === filteredList.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filteredList.map(w => w.id)));
+    }
+  };
+
+  // ─── Single Process Modal (Approve / Reject) ────────────────────────────────
   const openProcessModal = (request, action) => {
     setModal({
       open: true,
@@ -101,7 +147,75 @@ export default function Withdrawals() {
     }
   };
 
-  // Calculate stats
+  // ─── Single Delete Modal ───────────────────────────────────────────────────
+  const openDeleteModal = (request) => {
+    setDeleteModal({
+      open: true,
+      request,
+      refundPending: true,
+      submitting: false,
+      error: null
+    });
+  };
+
+  const closeDeleteModal = () => {
+    if (deleteModal.submitting) return;
+    setDeleteModal({ open: false, request: null, refundPending: true, submitting: false, error: null });
+  };
+
+  const submitSingleDelete = async () => {
+    if (!deleteModal.request) return;
+    setDeleteModal(prev => ({ ...prev, submitting: true, error: null }));
+    try {
+      await api.deleteWithdrawal(deleteModal.request.id, deleteModal.refundPending);
+      showToast("success", "Withdrawal request record deleted successfully.");
+      closeDeleteModal();
+      fetchWithdrawals();
+    } catch (err) {
+      setDeleteModal(prev => ({ ...prev, submitting: false, error: err.message || "Failed to delete request" }));
+    }
+  };
+
+  // ─── Bulk Action Modal (Approve, Reject, Delete) ───────────────────────────
+  const openBulkModal = (action) => {
+    setBulkModal({
+      open: true,
+      action,
+      refundPending: true,
+      notes: action === "approve" ? "Bulk approved via Telebirr" : action === "reject" ? "Rejected via bulk admin review" : "",
+      submitting: false,
+      error: null
+    });
+  };
+
+  const closeBulkModal = () => {
+    if (bulkModal.submitting) return;
+    setBulkModal({ open: false, action: "delete", refundPending: true, notes: "", submitting: false, error: null });
+  };
+
+  const submitBulkAction = async (e) => {
+    if (e) e.preventDefault();
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+
+    setBulkModal(prev => ({ ...prev, submitting: true, error: null }));
+    try {
+      if (bulkModal.action === "delete") {
+        const res = await api.bulkDeleteWithdrawals(ids, bulkModal.refundPending);
+        showToast("success", `Successfully deleted ${res.deletedCount} request(s)${res.refundedCount ? ` (refunded ${res.refundedCount} pending)` : ''}.`);
+      } else {
+        const res = await api.bulkUpdateWithdrawals(ids, bulkModal.action, bulkModal.notes);
+        showToast("success", `Successfully ${bulkModal.action === 'approve' ? 'approved' : 'rejected'} ${res.processedCount} request(s).`);
+      }
+
+      closeBulkModal();
+      fetchWithdrawals();
+    } catch (err) {
+      setBulkModal(prev => ({ ...prev, submitting: false, error: err.message || "Bulk operation failed" }));
+    }
+  };
+
+  // ─── Calculate Stats ───────────────────────────────────────────────────────
   const stats = useMemo(() => {
     let pendingCount = 0, pendingAmount = 0;
     let approvedCount = 0, approvedAmount = 0;
@@ -129,7 +243,7 @@ export default function Withdrawals() {
     };
   }, [withdrawals]);
 
-  // Filtered and searched list
+  // ─── Filtered and Searched List ───────────────────────────────────────────
   const filteredList = useMemo(() => {
     return withdrawals.filter(w => {
       // Status filter
@@ -142,7 +256,8 @@ export default function Withdrawals() {
         const phone = (w.phone_number || "").toLowerCase();
         const notes = (w.notes || "").toLowerCase();
         const amount = String(w.amount || "");
-        if (!userName.includes(q) && !phone.includes(q) && !notes.includes(q) && !amount.includes(q)) {
+        const id = String(w.id || "").toLowerCase();
+        if (!userName.includes(q) && !phone.includes(q) && !notes.includes(q) && !amount.includes(q) && !id.includes(q)) {
           return false;
         }
       }
@@ -150,6 +265,11 @@ export default function Withdrawals() {
       return true;
     });
   }, [withdrawals, filter, search]);
+
+  // Identify how many of the selected are pending
+  const selectedPendingCount = useMemo(() => {
+    return withdrawals.filter(w => selectedIds.has(w.id) && w.status === 'pending').length;
+  }, [withdrawals, selectedIds]);
 
   return (
     <div>
@@ -167,7 +287,7 @@ export default function Withdrawals() {
       <div className="flex-between mb-6">
         <div>
           <h1 className="page-title">Withdrawal Requests</h1>
-          <p className="text-muted">Review, approve, and process player payout requests to Telebirr.</p>
+          <p className="text-muted">Review, approve, and process player payout requests to Telebirr with bulk management tools.</p>
         </div>
         <button className="btn btn-ghost" onClick={fetchWithdrawals} disabled={loading} title="Refresh requests">
           <RefreshCw size={16} className={loading ? "spinner" : ""} />
@@ -244,12 +364,72 @@ export default function Withdrawals() {
               <input
                 type="text"
                 className="form-input"
-                placeholder="Search by player, phone number, notes..."
+                placeholder="Search by player, phone number, notes, ID..."
                 value={search}
                 onChange={e => setSearch(e.target.value)}
               />
             </div>
           </div>
+
+          {/* Bulk Action Bar when 1+ selected */}
+          {selectedIds.size > 0 && (
+            <div 
+              className="flex-between mb-4 p-3 rounded-lg"
+              style={{ 
+                background: "rgba(234, 161, 27, 0.12)", 
+                border: "1px solid rgba(234, 161, 27, 0.35)",
+                flexWrap: "wrap",
+                gap: "10px"
+              }}
+            >
+              <div className="flex-center gap-2">
+                <span className="badge badge-warning" style={{ fontSize: 13, padding: "4px 10px" }}>
+                  {selectedIds.size} Selected
+                </span>
+                <span className="text-muted text-xs">
+                  ({selectedPendingCount} pending)
+                </span>
+              </div>
+
+              <div className="flex gap-2">
+                {selectedPendingCount > 0 && (
+                  <>
+                    <button
+                      className="btn btn-sm btn-success flex-center gap-1"
+                      onClick={() => openBulkModal("approve")}
+                      title="Bulk approve selected pending requests"
+                    >
+                      <CheckCircle size={14} />
+                      <span>Bulk Approve ({selectedPendingCount})</span>
+                    </button>
+                    <button
+                      className="btn btn-sm btn-danger flex-center gap-1"
+                      onClick={() => openBulkModal("reject")}
+                      title="Bulk reject and refund selected pending requests"
+                    >
+                      <XCircle size={14} />
+                      <span>Bulk Reject ({selectedPendingCount})</span>
+                    </button>
+                  </>
+                )}
+                <button
+                  className="btn btn-sm flex-center gap-1"
+                  style={{ background: "rgba(239, 68, 68, 0.2)", color: "var(--danger)", border: "1px solid var(--danger)" }}
+                  onClick={() => openBulkModal("delete")}
+                  title="Bulk delete selected request records"
+                >
+                  <Trash2 size={14} />
+                  <span>Bulk Delete ({selectedIds.size})</span>
+                </button>
+                <button
+                  className="btn btn-sm btn-ghost"
+                  onClick={() => setSelectedIds(new Set())}
+                >
+                  Clear Selection
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Table */}
           {loading ? (
@@ -272,6 +452,15 @@ export default function Withdrawals() {
               <table>
                 <thead>
                   <tr>
+                    <th style={{ width: 40, textAlign: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={filteredList.length > 0 && selectedIds.size === filteredList.length}
+                        onChange={handleToggleSelectAll}
+                        title="Select/Deselect all visible requests"
+                        style={{ cursor: "pointer", width: 16, height: 16 }}
+                      />
+                    </th>
                     <th>Date & Time</th>
                     <th>Player</th>
                     <th>Telebirr Phone</th>
@@ -284,8 +473,20 @@ export default function Withdrawals() {
                 <tbody>
                   {filteredList.map(w => {
                     const amountNum = parseFloat(w.amount) || 0;
+                    const isSelected = selectedIds.has(w.id);
+
                     return (
-                      <tr key={w.id}>
+                      <tr key={w.id} style={{ background: isSelected ? "rgba(234, 161, 27, 0.05)" : undefined }}>
+                        {/* Checkbox */}
+                        <td style={{ textAlign: "center" }}>
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => handleToggleSelect(w.id)}
+                            style={{ cursor: "pointer", width: 16, height: 16 }}
+                          />
+                        </td>
+
                         {/* Date */}
                         <td className="text-sm">
                           <div className="font-medium text-primary">
@@ -366,12 +567,15 @@ export default function Withdrawals() {
                                 ? "badge-warning"
                                 : w.status === "approved"
                                 ? "badge-success"
+                                : w.status === "cancelled"
+                                ? "badge-secondary"
                                 : "badge-danger"
                             }`}
                           >
                             {w.status === "pending" && <Clock size={12} />}
                             {w.status === "approved" && <CheckCircle size={12} />}
                             {w.status === "rejected" && <XCircle size={12} />}
+                            {w.status === "cancelled" && <XCircle size={12} />}
                             {w.status.toUpperCase()}
                           </span>
                         </td>
@@ -390,26 +594,38 @@ export default function Withdrawals() {
 
                         {/* Actions */}
                         <td>
-                          {w.status === "pending" ? (
-                            <div className="flex gap-2">
-                              <button
-                                className="btn btn-success btn-sm"
-                                onClick={() => openProcessModal(w, "approve")}
-                              >
-                                <CheckCircle size={14} />
-                                <span>Approve & Pay</span>
-                              </button>
-                              <button
-                                className="btn btn-danger btn-sm"
-                                onClick={() => openProcessModal(w, "reject")}
-                              >
-                                <XCircle size={14} />
-                                <span>Reject & Refund</span>
-                              </button>
-                            </div>
-                          ) : (
-                            <span className="text-muted text-xs">Completed</span>
-                          )}
+                          <div className="flex gap-1.5 items-center">
+                            {w.status === "pending" ? (
+                              <>
+                                <button
+                                  className="btn btn-success btn-sm"
+                                  onClick={() => openProcessModal(w, "approve")}
+                                  title="Approve and mark as paid"
+                                >
+                                  <CheckCircle size={14} />
+                                  <span>Approve</span>
+                                </button>
+                                <button
+                                  className="btn btn-danger btn-sm"
+                                  onClick={() => openProcessModal(w, "reject")}
+                                  title="Reject request and refund to wallet"
+                                >
+                                  <XCircle size={14} />
+                                  <span>Reject</span>
+                                </button>
+                              </>
+                            ) : null}
+
+                            {/* Individual Delete Button */}
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              style={{ color: "var(--danger)", padding: "4px 8px" }}
+                              onClick={() => openDeleteModal(w)}
+                              title="Delete this withdrawal request record"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -421,7 +637,7 @@ export default function Withdrawals() {
         </div>
       </div>
 
-      {/* Process Modal */}
+      {/* Single Process Modal (Approve / Reject) */}
       {modal.open && modal.request && (
         <div className="modal-overlay" onClick={closeModal}>
           <div className="modal" onClick={e => e.stopPropagation()}>
@@ -547,6 +763,161 @@ export default function Withdrawals() {
                       <span>Confirm Rejection & Refund</span>
                     </>
                   )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Single Delete Confirmation Modal */}
+      {deleteModal.open && deleteModal.request && (
+        <div className="modal-overlay" onClick={closeDeleteModal}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="flex-center gap-2">
+                <Trash2 className="text-danger" size={20} />
+                <h3 className="modal-title">Delete Withdrawal Request</h3>
+              </div>
+              <button className="btn btn-ghost btn-sm" onClick={closeDeleteModal} disabled={deleteModal.submitting}>
+                ✕
+              </button>
+            </div>
+
+            <div className="modal-body">
+              {deleteModal.error && (
+                <div className="p-3 mb-4 rounded" style={{ background: "rgba(239,68,68,0.15)", border: "1px solid var(--danger)", color: "var(--danger)", fontSize: 13 }}>
+                  {deleteModal.error}
+                </div>
+              )}
+
+              <p className="text-secondary text-sm mb-4">
+                Are you sure you want to permanently delete this withdrawal request for{" "}
+                <strong className="text-white">{deleteModal.request.user_name}</strong> (
+                <span className="text-warning font-bold">{parseFloat(deleteModal.request.amount).toLocaleString()} ETB</span>)?
+              </p>
+
+              {deleteModal.request.status === "pending" && (
+                <div className="p-3 mb-3 rounded text-sm" style={{ background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.35)", color: "var(--warning)" }}>
+                  <label className="flex items-center gap-2 cursor-pointer font-bold">
+                    <input
+                      type="checkbox"
+                      checked={deleteModal.refundPending}
+                      onChange={e => setDeleteModal(prev => ({ ...prev, refundPending: e.target.checked }))}
+                    />
+                    <span>Automatically refund {parseFloat(deleteModal.request.amount).toLocaleString()} ETB to player's wallet before deletion</span>
+                  </label>
+                </div>
+              )}
+            </div>
+
+            <div className="modal-footer">
+              <button type="button" className="btn btn-ghost" onClick={closeDeleteModal} disabled={deleteModal.submitting}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={submitSingleDelete}
+                disabled={deleteModal.submitting}
+              >
+                {deleteModal.submitting ? "Deleting..." : "Delete Request"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Action Modal (Bulk Delete | Bulk Approve | Bulk Reject) */}
+      {bulkModal.open && (
+        <div className="modal-overlay" onClick={closeBulkModal}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="flex-center gap-2">
+                {bulkModal.action === "delete" ? (
+                  <Trash2 className="text-danger" size={20} />
+                ) : bulkModal.action === "approve" ? (
+                  <CheckCircle className="text-success" size={20} />
+                ) : (
+                  <AlertTriangle className="text-danger" size={20} />
+                )}
+                <h3 className="modal-title capitalize">
+                  {bulkModal.action === "delete"
+                    ? `Bulk Delete (${selectedIds.size} Requests)`
+                    : bulkModal.action === "approve"
+                    ? `Bulk Approve (${selectedPendingCount} Pending Requests)`
+                    : `Bulk Reject (${selectedPendingCount} Pending Requests)`}
+                </h3>
+              </div>
+              <button className="btn btn-ghost btn-sm" onClick={closeBulkModal} disabled={bulkModal.submitting}>
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={submitBulkAction}>
+              <div className="modal-body">
+                {bulkModal.error && (
+                  <div className="p-3 mb-4 rounded" style={{ background: "rgba(239,68,68,0.15)", border: "1px solid var(--danger)", color: "var(--danger)", fontSize: 13 }}>
+                    {bulkModal.error}
+                  </div>
+                )}
+
+                {bulkModal.action === "delete" ? (
+                  <div>
+                    <p className="text-secondary text-sm mb-4">
+                      You are about to delete <strong>{selectedIds.size}</strong> withdrawal request records permanently.
+                    </p>
+
+                    {selectedPendingCount > 0 && (
+                      <div className="p-3 mb-3 rounded text-sm" style={{ background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.35)", color: "var(--warning)" }}>
+                        <div className="font-bold mb-2">
+                          ⚠️ Notice: {selectedPendingCount} of the selected requests are currently PENDING.
+                        </div>
+                        <label className="flex items-center gap-2 cursor-pointer font-bold text-white">
+                          <input
+                            type="checkbox"
+                            checked={bulkModal.refundPending}
+                            onChange={e => setBulkModal(prev => ({ ...prev, refundPending: e.target.checked }))}
+                          />
+                          <span>Refund funds to players' wallets before deleting pending requests</span>
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div>
+                    <p className="text-secondary text-sm mb-4">
+                      You are about to {bulkModal.action === "approve" ? "approve and mark as paid" : "reject and refund"}{" "}
+                      <strong>{selectedPendingCount}</strong> pending withdrawal requests.
+                    </p>
+
+                    <div className="form-group">
+                      <label className="form-label">
+                        {bulkModal.action === "approve" ? "Batch Reference / Note (Optional)" : "Reason for Rejection"}
+                      </label>
+                      <input
+                        type="text"
+                        className="form-input"
+                        placeholder={bulkModal.action === "approve" ? "e.g. Bulk Telebirr Payout" : "Reason..."}
+                        value={bulkModal.notes}
+                        onChange={e => setBulkModal(prev => ({ ...prev, notes: e.target.value }))}
+                        required={bulkModal.action === "reject"}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="modal-footer">
+                <button type="button" className="btn btn-ghost" onClick={closeBulkModal} disabled={bulkModal.submitting}>
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className={`btn ${bulkModal.action === "delete" || bulkModal.action === "reject" ? "btn-danger" : "btn-success"}`}
+                  disabled={bulkModal.submitting}
+                >
+                  {bulkModal.submitting ? "Processing..." : `Confirm ${bulkModal.action === "delete" ? "Delete" : bulkModal.action === "approve" ? "Approval" : "Rejection"}`}
                 </button>
               </div>
             </form>
