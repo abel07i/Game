@@ -1,0 +1,22 @@
+// CRITICAL BUG FIXES FOR adminRoutes.js
+
+// FIX #1: Line 213-214 - SQL Injection vulnerability
+// BEFORE:
+// whereClause += ` AND (u.display_name ILIKE ${params.length} OR u.phone_number ILIKE ${params.length})`;
+// 
+// AFTER:
+whereClause += ` AND (u.display_name ILIKE $${params.length} OR u.phone_number ILIKE $${params.length})`;
+
+// FIX #2: Line 245 - LIMIT/OFFSET SQL Injection  
+// BEFORE:
+// LIMIT ${dataParams.length - 1} OFFSET ${dataParams.length}
+//
+// AFTER:
+const limitParam = dataParams.length - 1;
+const offsetParam = dataParams.length;
+// LIMIT $${limitParam} OFFSET $${offsetParam}
+
+// EXPLANATION:
+// The original code was using template literal interpolation without the $ prefix for SQL parameters
+// This creates SQL injection vulnerabilities. Must use $1, $2, etc. for parameterized queries.
+// The $ sign was missing, turning parameters into literal numbers in the SQL string.

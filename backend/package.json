@@ -1,0 +1,23 @@
+{
+  "name": "fast-derash",
+  "version": "1.0.0",
+  "description": "Fast Derash - gamified high-speed digital Equb/Derash pool system",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^18.0.5",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.1",
+    "socket.io": "^4.7.2",
+    "uuid": "^9.0.1"
+  },
+  "allowScripts": {
+    "bcrypt@6.0.0": true
+  }
+}

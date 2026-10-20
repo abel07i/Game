@@ -1,0 +1,11 @@
+{
+  "name": "fast-equb-game",
+  "version": "1.0.0",
+  "description": "Fast Equb - All-in-one dev launcher",
+  "scripts": {
+    "dev": "start \"Backend\" cmd /k \"cd backend && npm run dev\" && start \"Frontend\" cmd /k \"cd frontend && npm run dev\" && start \"Admin\" cmd /k \"cd admin && npm run dev\"",
+    "backend": "cd backend && npm run dev",
+    "frontend": "cd frontend && npm run dev",
+    "admin": "cd admin && npm run dev"
+  }
+}
