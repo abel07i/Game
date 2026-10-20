@@ -379,8 +379,8 @@ export default function App() {
         }
     }, [seatModal.open, drawModal.open]);
     const [confirmOpenRoom, setConfirmOpenRoom] = useState(false);
-    const [walletModal, setWalletModal] = useState({ open: false, action: null, amount: '', transactionId: '', loading: false });
-    const [walletTabState, setWalletTabState] = useState({ active: 'deposit', amount: '', transactionId: '', loading: false });
+    const [walletTabState, setWalletTabState] = useState({ active: 'deposit', amount: '', transactionId: '', phone: '', loading: false });
+    const [myWithdrawals, setMyWithdrawals] = useState([]);
     const [orderAmount, setOrderAmount] = useState(100);
     const [orderExpanded, setOrderExpanded] = useState(true);
     const [createdOrder, setCreatedOrder] = useState(null);
@@ -1311,6 +1311,8 @@ export default function App() {
                 .then(data => setWalletTransactions(Array.isArray(data) ? data : []))
                 .catch(err => console.error('Failed to fetch transactions:', err));
 
+            fetchMyWithdrawals();
+
             authFetch('http://localhost:3000/api/v1/user/invite')
                 .then(res => res.json())
                 .then(data => {
@@ -1719,6 +1721,9 @@ export default function App() {
                 return;
             }
             payload.amount = amount;
+            if (walletTabState.phone) {
+                payload.phoneNumber = walletTabState.phone.trim();
+            }
         }
 
         try {
@@ -1731,11 +1736,12 @@ export default function App() {
             if (data.error) showAlert(data.error, 'error');
             else {
                 setUser(u => ({ ...u, balance: data.balance }));
-                setWalletTabState(prev => ({ ...prev, amount: '', transactionId: '', loading: false }));
+                setWalletTabState(prev => ({ ...prev, amount: '', transactionId: '', phone: '', loading: false }));
                 if (actionType === 'deposit') {
                     showAlert(`Successfully verified and deposited ${data.depositedAmount || 0} ETB!`, 'success');
                 } else {
-                    showAlert('Withdrawal request submitted successfully', 'success');
+                    showAlert(data.message || 'Withdrawal request submitted successfully', 'success');
+                    fetchMyWithdrawals();
                 }
                 
                 // Refresh transactions
@@ -1750,6 +1756,43 @@ export default function App() {
             setWalletTabState(prev => ({ ...prev, loading: false }));
         }
     };
+
+    const fetchMyWithdrawals = () => {
+        if (!user) return;
+        authFetch('http://localhost:3000/api/v1/wallet/withdrawals')
+            .then(res => res.json())
+            .then(data => {
+                if (data && Array.isArray(data.requests)) {
+                    setMyWithdrawals(data.requests);
+                }
+            })
+            .catch(() => {});
+    };
+
+    const cancelWithdrawalRequest = async (requestId) => {
+        try {
+            const res = await authFetch(`http://localhost:3000/api/v1/wallet/withdraw/${requestId}/cancel`, {
+                method: 'POST'
+            });
+            const data = await res.json();
+            if (data.error) {
+                showAlert(data.error, 'error');
+            } else {
+                showAlert(data.message || 'Withdrawal request cancelled and refunded', 'success');
+                if (data.newBalance !== undefined) {
+                    setUser(u => ({ ...u, balance: data.newBalance }));
+                }
+                fetchMyWithdrawals();
+                authFetch(`http://localhost:3000/api/v1/wallet/transactions?mode=${mode}`)
+                    .then(res => res.json())
+                    .then(txData => setWalletTransactions(Array.isArray(txData) ? txData : []))
+                    .catch(() => {});
+            }
+        } catch {
+            showAlert('Failed to cancel withdrawal request', 'error');
+        }
+    };
+
 
     const handleCreateOrder = async () => {
         if (!user) {
@@ -3114,36 +3157,180 @@ export default function App() {
                                 </div>
                             )}
 
-                            {walletTabState.active === 'withdraw' && (
-                                <div className="space-y-3.5">
-                                    <div className="bg-[#181308] border border-gold-500/25 p-3.5 sm:p-4 rounded-xl sm:rounded-2xl">
-                                        <h4 className="text-gold-400 text-xs sm:text-sm font-bold mb-1">{t('withdrawFunds')}</h4>
-                                        <p className="text-white/50 text-[10px] sm:text-xs mb-3">{t('enterAmount')}</p>
-                                        <form onSubmit={(e) => executeInlineWalletAction(e, 'withdraw')}>
-                                            <div className="relative mb-3">
-                                                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-white/40 font-bold text-xs sm:text-sm">ETB</span>
-                                                <input 
-                                                    type="number" 
-                                                    min="1"
-                                                    required
-                                                    value={walletTabState.amount}
-                                                    onChange={e => setWalletTabState({...walletTabState, amount: e.target.value})}
-                                                    className="w-full bg-black/60 border border-white/10 rounded-xl pl-12 pr-3.5 py-2.5 sm:py-3 text-sm sm:text-base font-mono font-bold text-white focus:outline-none focus:border-gold-500 transition placeholder-white/20" 
-                                                    placeholder="0.00"
-                                                />
+                            {walletTabState.active === 'withdraw' && (() => {
+                                const pendingWithdrawal = myWithdrawals.find(w => w.status === 'pending');
+                                const currentBal = parseFloat(user?.balance || 0);
+
+                                return (
+                                    <div className="space-y-3.5">
+                                        {/* Active Pending Withdrawal Card */}
+                                        {pendingWithdrawal ? (
+                                            <div className="bg-gradient-to-r from-amber-950/40 to-black/60 border border-amber-500/40 p-4 rounded-xl sm:rounded-2xl space-y-3">
+                                                <div className="flex items-center justify-between">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+                                                        <span className="text-amber-400 font-bold text-xs uppercase tracking-wider">Pending Payout Request</span>
+                                                    </div>
+                                                    <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                                                        Under Review
+                                                    </span>
+                                                </div>
+
+                                                <div className="flex items-baseline justify-between">
+                                                    <div>
+                                                        <div className="text-2xl font-black text-white font-mono">
+                                                            {parseFloat(pendingWithdrawal.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })} <span className="text-xs text-gold-400">ETB</span>
+                                                        </div>
+                                                        <div className="text-white/50 text-[11px] mt-0.5">
+                                                            Payout to: <span className="text-white font-mono font-bold">{pendingWithdrawal.phone_number}</span> (Telebirr)
+                                                        </div>
+                                                    </div>
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => cancelWithdrawalRequest(pendingWithdrawal.id)}
+                                                        className="px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/40 text-xs font-bold transition active:scale-95 flex items-center gap-1"
+                                                        title="Cancel request and instantly refund to your wallet"
+                                                    >
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                                                        <span>Cancel & Refund</span>
+                                                    </button>
+                                                </div>
+
+                                                <div className="text-white/40 text-[10px] flex items-center justify-between pt-2 border-t border-white/5">
+                                                    <span>Submitted: {new Date(pendingWithdrawal.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                                    <span>Processed within 5–15 mins</span>
+                                                </div>
                                             </div>
-                                            <button 
-                                                type="submit" 
-                                                disabled={walletTabState.loading}
-                                                className="w-full py-2.5 sm:py-3 rounded-xl bg-surface-700 hover:bg-surface-600 text-white font-bold text-xs sm:text-sm transition flex items-center justify-center gap-1.5 active:scale-98 disabled:opacity-50"
-                                            >
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
-                                                {walletTabState.loading ? t('withdrawing') : t('withdraw')}
-                                            </button>
-                                        </form>
+                                        ) : null}
+
+                                        {/* New Withdrawal Form */}
+                                        <div className="bg-[#181308] border border-gold-500/25 p-3.5 sm:p-4 rounded-xl sm:rounded-2xl">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <h4 className="text-gold-400 text-xs sm:text-sm font-bold">{t('withdrawFunds')}</h4>
+                                                <span className="text-white/40 text-[11px]">
+                                                    Available: <strong className="text-gold-300 font-mono">{currentBal.toLocaleString(undefined, { minimumFractionDigits: 2 })} ETB</strong>
+                                                </span>
+                                            </div>
+                                            <p className="text-white/50 text-[10px] sm:text-xs mb-3">
+                                                Enter the amount and your Telebirr phone number. Payouts are sent directly to your phone.
+                                            </p>
+
+                                            <form onSubmit={(e) => executeInlineWalletAction(e, 'withdraw')} className="space-y-3">
+                                                {/* Amount input */}
+                                                <div>
+                                                    <label className="block text-white/50 text-[10px] font-bold uppercase mb-1">Amount to Withdraw</label>
+                                                    <div className="relative">
+                                                        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-white/40 font-bold text-xs sm:text-sm">ETB</span>
+                                                        <input 
+                                                            type="number" 
+                                                            min="10"
+                                                            step="1"
+                                                            required
+                                                            disabled={Boolean(pendingWithdrawal)}
+                                                            value={walletTabState.amount}
+                                                            onChange={e => setWalletTabState({...walletTabState, amount: e.target.value})}
+                                                            className="w-full bg-black/60 border border-white/10 rounded-xl pl-12 pr-3.5 py-2.5 sm:py-3 text-sm sm:text-base font-mono font-bold text-white focus:outline-none focus:border-gold-500 transition placeholder-white/20 disabled:opacity-50" 
+                                                            placeholder="Min: 10.00"
+                                                        />
+                                                    </div>
+
+                                                    {/* Quick Presets */}
+                                                    {!pendingWithdrawal && currentBal >= 10 && (
+                                                        <div className="flex gap-1.5 mt-2 overflow-x-auto pb-1">
+                                                            {[50, 100, 200, 500].filter(amt => amt <= currentBal).map(preset => (
+                                                                <button
+                                                                    key={preset}
+                                                                    type="button"
+                                                                    onClick={() => setWalletTabState(prev => ({ ...prev, amount: String(preset) }))}
+                                                                    className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-gold-500/20 text-white/70 hover:text-gold-300 border border-white/10 text-[11px] font-mono transition"
+                                                                >
+                                                                    +{preset}
+                                                                </button>
+                                                            ))}
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setWalletTabState(prev => ({ ...prev, amount: String(Math.floor(currentBal)) }))}
+                                                                className="px-2.5 py-1 rounded-lg bg-gold-500/10 hover:bg-gold-500/20 text-gold-400 border border-gold-500/30 text-[11px] font-bold font-mono transition"
+                                                            >
+                                                                Max
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {/* Payout Phone input */}
+                                                <div>
+                                                    <label className="block text-white/50 text-[10px] font-bold uppercase mb-1">Telebirr Payout Phone</label>
+                                                    <input 
+                                                        type="tel" 
+                                                        disabled={Boolean(pendingWithdrawal)}
+                                                        value={walletTabState.phone !== undefined && walletTabState.phone !== '' ? walletTabState.phone : (user?.phoneNumber || '')}
+                                                        onChange={e => setWalletTabState({...walletTabState, phone: e.target.value})}
+                                                        className="w-full bg-black/60 border border-white/10 rounded-xl px-3.5 py-2.5 sm:py-3 text-sm font-mono text-white focus:outline-none focus:border-gold-500 transition placeholder-white/20 disabled:opacity-50" 
+                                                        placeholder="09xxxxxxxx or +2519xxxxxxxx"
+                                                    />
+                                                </div>
+
+                                                <button 
+                                                    type="submit" 
+                                                    disabled={walletTabState.loading || Boolean(pendingWithdrawal) || currentBal < 10}
+                                                    className="w-full py-2.5 sm:py-3 rounded-xl bg-gold-600 hover:bg-gold-500 text-black font-black text-xs sm:text-sm transition shadow-[0_0_15px_rgba(234,161,27,0.2)] flex items-center justify-center gap-1.5 active:scale-98 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+                                                    {walletTabState.loading ? t('withdrawing') : pendingWithdrawal ? 'Pending Request Active' : currentBal < 10 ? 'Insufficient Balance' : t('withdraw')}
+                                                </button>
+                                            </form>
+                                        </div>
+
+                                        {/* Player's Past Withdrawal Requests */}
+                                        {myWithdrawals.length > 0 && (
+                                            <div className="bg-[#181308] border border-white/5 p-3.5 rounded-xl sm:rounded-2xl space-y-2">
+                                                <div className="flex items-center justify-between">
+                                                    <h5 className="text-white/70 text-xs font-bold">My Payout History</h5>
+                                                    <span className="text-white/40 text-[10px]">{myWithdrawals.length} request(s)</span>
+                                                </div>
+
+                                                <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                                                    {myWithdrawals.slice(0, 10).map(req => (
+                                                        <div key={req.id} className="p-2.5 rounded-lg bg-black/40 border border-white/5 flex items-center justify-between text-xs">
+                                                            <div>
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="font-bold text-white font-mono">
+                                                                        {parseFloat(req.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })} ETB
+                                                                    </span>
+                                                                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                                                        req.status === 'approved' ? 'bg-green-500/20 text-green-400' :
+                                                                        req.status === 'pending' ? 'bg-amber-500/20 text-amber-300' :
+                                                                        req.status === 'cancelled' ? 'bg-white/10 text-white/50' :
+                                                                        'bg-red-500/20 text-red-400'
+                                                                    }`}>
+                                                                        {req.status}
+                                                                    </span>
+                                                                </div>
+                                                                <div className="text-white/40 text-[10px] mt-0.5">
+                                                                    {new Date(req.created_at).toLocaleDateString()} {new Date(req.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • {req.phone_number}
+                                                                </div>
+                                                            </div>
+
+                                                            {req.status === 'pending' && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => cancelWithdrawalRequest(req.id)}
+                                                                    className="px-2 py-1 rounded bg-red-500/10 hover:bg-red-500/20 text-red-400 text-[11px] font-bold border border-red-500/30 transition"
+                                                                >
+                                                                    Cancel
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
-                                </div>
-                            )}
+                                );
+                            })()}
+
 
                             {walletTabState.active === 'history' && (
                                 <div className="space-y-3">
