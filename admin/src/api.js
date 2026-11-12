@@ -17,6 +17,10 @@ async function request(method, path, body = null) {
   if (body) opts.body = JSON.stringify(body);
 
   const res = await fetch(`${BASE_URL}${path}`, opts);
+  if (res.status === 401 && path !== '/auth/login') {
+    localStorage.removeItem('admin_token');
+    localStorage.removeItem('admin_user');
+  }
   const text = await res.text();
   let data = {};
   try {
@@ -74,8 +78,9 @@ const api = {
     const qs = new URLSearchParams(params).toString();
     return request('GET', `/transactions${qs ? '?' + qs : ''}`);
   },
-  deleteTransaction: (id) => request('DELETE', `/transactions/${id}`),
-  bulkDeleteTransactions: (ids) => request('POST', '/transactions/bulk-delete', { ids }),
+  deleteTransaction: (id, confirmPassword) => request('DELETE', `/transactions/${id}`, { confirmPassword }),
+  bulkDeleteTransactions: (ids, confirmPassword) => request('POST', '/transactions/bulk-delete', { ids, confirmPassword }),
+  getTransactionAuditLogs: () => request('GET', '/transactions/audit-logs'),
   getWithdrawals: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request('GET', `/withdrawals${qs ? '?' + qs : ''}`);

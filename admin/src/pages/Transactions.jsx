@@ -7,7 +7,12 @@ import {
   Search, 
   RefreshCw, 
   CheckCircle, 
-  AlertTriangle 
+  AlertTriangle,
+  ShieldCheck,
+  Lock,
+  Eye,
+  EyeOff,
+  History
 } from "lucide-react";
 
 export default function Transactions() {
@@ -17,11 +22,19 @@ export default function Transactions() {
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [toast, setToast] = useState(null);
 
+  // Security Audit Log state
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState(null);
+
   // Delete modal state
   const [deleteModal, setDeleteModal] = useState({
     open: false,
     isBulk: false,
     item: null, // single tx or null for bulk
+    confirmPassword: "",
+    showPassword: false,
     submitting: false,
     error: null
   });
@@ -73,12 +86,33 @@ export default function Transactions() {
     }
   };
 
+  const fetchAuditLogs = async () => {
+    setAuditLoading(true);
+    setAuditError(null);
+    try {
+      const res = await api.getTransactionAuditLogs();
+      setAuditLogs(res.logs || []);
+    } catch (err) {
+      setAuditError(err.message || "Failed to load security audit logs");
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+
+  const toggleAuditLogs = () => {
+    const next = !auditOpen;
+    setAuditOpen(next);
+    if (next) fetchAuditLogs();
+  };
+
   // ─── Delete Modal Handlers ──────────────────────────────────────────────────
   const openSingleDelete = (tx) => {
     setDeleteModal({
       open: true,
       isBulk: false,
       item: tx,
+      confirmPassword: "",
+      showPassword: false,
       submitting: false,
       error: null
     });
@@ -90,6 +124,8 @@ export default function Transactions() {
       open: true,
       isBulk: true,
       item: null,
+      confirmPassword: "",
+      showPassword: false,
       submitting: false,
       error: null
     });
@@ -97,22 +133,44 @@ export default function Transactions() {
 
   const closeDeleteModal = () => {
     if (deleteModal.submitting) return;
-    setDeleteModal({ open: false, isBulk: false, item: null, submitting: false, error: null });
+    setDeleteModal({
+      open: false,
+      isBulk: false,
+      item: null,
+      confirmPassword: "",
+      showPassword: false,
+      submitting: false,
+      error: null
+    });
   };
 
   const confirmDelete = async () => {
+    if (!deleteModal.confirmPassword.trim()) {
+      setDeleteModal(prev => ({ ...prev, error: "Please enter your admin password to confirm." }));
+      return;
+    }
     setDeleteModal(prev => ({ ...prev, submitting: true, error: null }));
     try {
       if (deleteModal.isBulk) {
         const ids = Array.from(selectedIds);
-        const res = await api.bulkDeleteTransactions(ids);
+        const res = await api.bulkDeleteTransactions(ids, deleteModal.confirmPassword);
         showToast("success", `Successfully deleted ${res.deletedCount || ids.length} transaction(s).`);
+        setSelectedIds(new Set());
       } else if (deleteModal.item) {
-        await api.deleteTransaction(deleteModal.item.id);
-        showToast("success", "Transaction deleted successfully.");
+        await api.deleteTransaction(deleteModal.item.id, deleteModal.confirmPassword);
+        showToast("success", "Transaction deleted and recorded in audit log.");
       }
-      closeDeleteModal();
+      setDeleteModal({
+        open: false,
+        isBulk: false,
+        item: null,
+        confirmPassword: "",
+        showPassword: false,
+        submitting: false,
+        error: null
+      });
       fetchTx();
+      if (auditOpen) fetchAuditLogs();
     } catch (err) {
       setDeleteModal(prev => ({ ...prev, submitting: false, error: err.message || "Failed to delete transaction" }));
     }
@@ -131,16 +189,109 @@ export default function Transactions() {
       )}
 
       {/* Header */}
-      <div className="flex-between mb-6">
+      <div className="flex-between mb-6" style={{ flexWrap: "wrap", gap: 12 }}>
         <div>
           <h1 className="page-title">Transaction Ledger</h1>
           <p className="text-muted">Audit, search, and manage financial transactions and player ledger records.</p>
         </div>
-        <button className="btn btn-ghost" onClick={fetchTx} disabled={loading} title="Refresh transactions">
-          <RefreshCw size={16} className={loading ? "spinner" : ""} />
-          <span>Refresh</span>
-        </button>
+        <div className="flex gap-2">
+          <button
+            className={`btn ${auditOpen ? "btn-primary" : "btn-ghost"}`}
+            onClick={toggleAuditLogs}
+            title="Toggle Security Audit Log"
+          >
+            <History size={16} />
+            <span>{auditOpen ? "Hide Audit Log" : "Security Audit Log"}</span>
+          </button>
+          <button className="btn btn-ghost" onClick={fetchTx} disabled={loading} title="Refresh transactions">
+            <RefreshCw size={16} className={loading ? "spinner" : ""} />
+            <span>Refresh</span>
+          </button>
+        </div>
       </div>
+
+      {/* Protected Ledger Security Notice */}
+      <div
+        className="flex-between mb-4 p-3 rounded-lg"
+        style={{
+          background: "rgba(16, 185, 129, 0.08)",
+          border: "1px solid rgba(16, 185, 129, 0.3)",
+          flexWrap: "wrap",
+          gap: 10
+        }}
+      >
+        <div className="flex-center gap-2" style={{ fontSize: 13 }}>
+          <ShieldCheck size={18} style={{ color: "#10b981", flexShrink: 0 }} />
+          <span>
+            <strong>Protected Ledger:</strong> Ledger deletions require admin password re-authentication, are rate-limited, and write a permanent snapshot to the immutable security audit trail.
+          </span>
+        </div>
+      </div>
+
+      {/* Forensic Security Audit Log Panel */}
+      {auditOpen && (
+        <div className="card mb-6">
+          <div className="card-body">
+            <div className="flex-between mb-3" style={{ flexWrap: "wrap", gap: 10 }}>
+              <div className="flex-center gap-2">
+                <Lock size={16} style={{ color: "var(--warning)" }} />
+                <h3 style={{ margin: 0, fontSize: 16 }}>Immutable Security Audit Log</h3>
+              </div>
+              <button className="btn btn-ghost btn-sm" onClick={fetchAuditLogs} disabled={auditLoading}>
+                <RefreshCw size={14} className={auditLoading ? "spinner" : ""} />
+                <span>Reload Log</span>
+              </button>
+            </div>
+
+            {auditError && (
+              <div className="p-3 mb-3 rounded" style={{ background: "rgba(239,68,68,0.15)", border: "1px solid var(--danger)", color: "var(--danger)", fontSize: 13 }}>
+                {auditError}
+              </div>
+            )}
+
+            {auditLoading ? (
+              <p className="text-muted text-sm">Loading audit trail...</p>
+            ) : auditLogs.length === 0 ? (
+              <p className="text-muted text-sm">No transaction deletion events have been recorded yet.</p>
+            ) : (
+              <div className="table-responsive">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Admin</th>
+                      <th>Action</th>
+                      <th>Records</th>
+                      <th>Deleted IDs / Amounts</th>
+                      <th>IP Address</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {auditLogs.map(log => {
+                      const snap = Array.isArray(log.snapshot) ? log.snapshot : [];
+                      const totalAmt = snap.reduce((acc, s) => acc + parseFloat(s.amount || 0), 0);
+                      return (
+                        <tr key={log.id}>
+                          <td className="text-xs text-muted">{new Date(log.created_at).toLocaleString()}</td>
+                          <td className="text-sm font-medium">{log.admin_username || log.admin_id?.slice(0, 8) || "Admin"}</td>
+                          <td><span className="badge badge-warning">{log.action}</span></td>
+                          <td className="text-sm">{(log.target_ids || []).length}</td>
+                          <td className="text-xs font-mono">
+                            {(log.target_ids || []).slice(0, 3).map(id => id.slice(0, 8)).join(", ")}
+                            {(log.target_ids || []).length > 3 ? ` +${log.target_ids.length - 3} more` : ""}
+                            {snap.length > 0 ? ` (${totalAmt.toLocaleString()} ETB)` : ""}
+                          </td>
+                          <td className="text-xs font-mono text-muted">{log.ip_address || "—"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <div className="card-body">
@@ -398,6 +549,51 @@ export default function Transactions() {
                   <span className="font-bold text-warning">{parseFloat(deleteModal.item?.amount || 0).toLocaleString()} ETB</span>)?
                 </p>
               )}
+
+              <div className="mt-4">
+                <label className="form-label text-xs font-medium" htmlFor="tx-delete-confirm-pw">
+                  Confirm Your Admin Password
+                </label>
+                <div style={{ position: "relative" }}>
+                  <input
+                    id="tx-delete-confirm-pw"
+                    type={deleteModal.showPassword ? "text" : "password"}
+                    className="form-input"
+                    style={{ paddingRight: 38 }}
+                    placeholder="Enter your admin password"
+                    autoComplete="current-password"
+                    value={deleteModal.confirmPassword}
+                    disabled={deleteModal.submitting}
+                    onChange={e => setDeleteModal(prev => ({ ...prev, confirmPassword: e.target.value, error: null }))}
+                    onKeyDown={e => {
+                      if (e.key === "Enter" && deleteModal.confirmPassword.trim() && !deleteModal.submitting) {
+                        confirmDelete();
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    aria-label={deleteModal.showPassword ? "Hide password" : "Show password"}
+                    onClick={() => setDeleteModal(prev => ({ ...prev, showPassword: !prev.showPassword }))}
+                    style={{
+                      position: "absolute",
+                      right: 10,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      background: "transparent",
+                      border: "none",
+                      color: "var(--text-muted)",
+                      cursor: "pointer",
+                      padding: 4
+                    }}
+                  >
+                    {deleteModal.showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+                <span className="text-muted text-xs mt-1 block">
+                  A full snapshot of the deleted record(s) will be preserved in the Security Audit Log.
+                </span>
+              </div>
             </div>
 
             <div className="modal-footer">
@@ -408,7 +604,7 @@ export default function Transactions() {
                 type="button"
                 className="btn btn-danger"
                 onClick={confirmDelete}
-                disabled={deleteModal.submitting}
+                disabled={deleteModal.submitting || !deleteModal.confirmPassword.trim()}
               >
                 {deleteModal.submitting ? "Deleting..." : "Confirm Delete"}
               </button>

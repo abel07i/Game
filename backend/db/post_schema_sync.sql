@@ -499,3 +499,37 @@ BEGIN
 END;
 $function$;
 
+-- 8. Immutable Admin Audit Log Table (forensic trail for sensitive ledger actions)
+CREATE TABLE IF NOT EXISTS admin_audit_logs (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    admin_id        UUID,
+    admin_username  VARCHAR(50),
+    action          VARCHAR(64) NOT NULL,
+    target_type     VARCHAR(64) NOT NULL,
+    target_ids      TEXT[] NOT NULL DEFAULT '{}',
+    snapshot        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ip_address      VARCHAR(64),
+    user_agent      TEXT,
+    created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+-- Keep forensic admin_id immutable even if the user row is later removed
+ALTER TABLE admin_audit_logs DROP CONSTRAINT IF EXISTS admin_audit_logs_admin_id_fkey;
+
+CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_created ON admin_audit_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_admin_id ON admin_audit_logs(admin_id);
+
+CREATE OR REPLACE FUNCTION public.fn_prevent_audit_log_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $function$
+BEGIN
+    RAISE EXCEPTION 'Security audit log is strictly immutable: % not allowed', TG_OP;
+END;
+$function$;
+
+DROP TRIGGER IF EXISTS trg_prevent_audit_log_mutation ON admin_audit_logs;
+CREATE TRIGGER trg_prevent_audit_log_mutation
+    BEFORE UPDATE OR DELETE ON admin_audit_logs
+    FOR EACH ROW EXECUTE FUNCTION public.fn_prevent_audit_log_mutation();
+

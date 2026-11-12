@@ -11,6 +11,79 @@ const adminLoginLimiter = createRateLimiter({
   message: 'Too many admin login attempts. Please wait 15 minutes.'
 });
 
+const txMutationLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  keyGenerator: (req) => `${req.ip}:${req.admin?.id || 'anon'}:txdel`,
+  message: 'Too many transaction modification attempts. Please wait 15 minutes.'
+});
+
+const adminReadLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 120,
+  keyGenerator: (req) => `${req.ip}:${req.admin?.id || 'anon'}:adminread`,
+  message: 'Too many admin requests. Please slow down.'
+});
+
+const ALLOWED_TX_TYPES = new Set([
+  'deposit', 'withdrawal', 'ticket_buy', 'payout_win',
+  'platform_tax', 'refund', 'demo_credit', 'adjustment'
+]);
+const ALLOWED_TX_STATUSES = new Set(['pending', 'completed', 'failed', 'reversed']);
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_TX_BULK_DELETE = 100;
+
+async function verifyAdminActionPassword(adminId, confirmPassword) {
+  if (typeof confirmPassword !== 'string' || confirmPassword.length === 0) {
+    return { ok: false, status: 400, error: 'Admin password confirmation is required' };
+  }
+  const res = await db.query(
+    `SELECT id, display_name, password_hash, is_active FROM users WHERE id = $1 AND role = 'admin'`,
+    [adminId]
+  );
+  if (res.rows.length === 0 || res.rows[0].is_active === false) {
+    return { ok: false, status: 403, error: 'Admin account is inactive or unauthorized' };
+  }
+  const matched = await verifyPassword(confirmPassword, res.rows[0].password_hash);
+  if (!matched) {
+    return { ok: false, status: 403, error: 'Incorrect admin password confirmation' };
+  }
+  return { ok: true, adminName: res.rows[0].display_name || null };
+}
+
+async function deleteTransactionsWithAudit({ client, ids, action, adminId, adminUsername, req }) {
+  const locked = await client.query(
+    `SELECT t.id, t.wallet_id, t.tx_type, t.amount, t.direction, t.status,
+            t.reference_note, t.created_at, w.user_id
+     FROM transactions t
+     LEFT JOIN wallets w ON w.id = t.wallet_id
+     WHERE t.id = ANY($1::uuid[])
+     FOR UPDATE OF t`,
+    [ids]
+  );
+  if (locked.rows.length === 0) {
+    return [];
+  }
+
+  const targetIds = locked.rows.map(r => r.id);
+  const ip = String(req.ip || '').slice(0, 64) || null;
+  const ua = String(req.headers['user-agent'] || '').slice(0, 500) || null;
+
+  await client.query(
+    `INSERT INTO admin_audit_logs
+       (admin_id, admin_username, action, target_type, target_ids, snapshot, ip_address, user_agent)
+     VALUES ($1, $2, $3, 'transaction', $4::text[], $5::jsonb, $6, $7)`,
+    [adminId, adminUsername, action, targetIds, JSON.stringify(locked.rows), ip, ua]
+  );
+
+  await client.query("SET LOCAL app.allow_tx_delete = 'true'");
+  const delRes = await client.query(
+    'DELETE FROM transactions WHERE id = ANY($1::uuid[]) RETURNING id',
+    [targetIds]
+  );
+  return delRes.rows.map(r => r.id);
+}
+
 router.param('id', (req, res, next, id) => {
   if (!isValidUuid(id)) {
     return res.status(400).json({ error: 'Invalid ID format' });
@@ -107,7 +180,7 @@ router.put('/auth/profile', adminMiddleware, async (req, res) => {
 
 // ── Dashboard Stats ───────────────────────────────────────────────────────────
 
-router.get('/dashboard/stats', adminMiddleware, async (req, res) => {
+router.get('/dashboard/stats', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const [players, activeGames, finance, today, depositTotal, withdrawalTotal] = await Promise.all([
       db.query(`
@@ -162,7 +235,7 @@ router.get('/dashboard/stats', adminMiddleware, async (req, res) => {
   }
 });
 
-router.get('/dashboard/recent-transactions', adminMiddleware, async (req, res) => {
+router.get('/dashboard/recent-transactions', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const result = await db.query(`
       SELECT
@@ -181,7 +254,7 @@ router.get('/dashboard/recent-transactions', adminMiddleware, async (req, res) =
   }
 });
 
-router.get('/dashboard/recent-games', adminMiddleware, async (req, res) => {
+router.get('/dashboard/recent-games', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const result = await db.query(`
       SELECT
@@ -695,18 +768,39 @@ router.put('/room-configs/quota/:groupSize', adminMiddleware, async (req, res) =
 
 // ── Transactions ──────────────────────────────────────────────────────────────
 
-router.get('/transactions', adminMiddleware, async (req, res) => {
+router.get('/transactions', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const { type, status, dateFrom, dateTo, search, page = 1, limit = 20 } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    if (type && !ALLOWED_TX_TYPES.has(String(type))) {
+      return res.status(400).json({ error: 'Invalid transaction type filter' });
+    }
+    if (status && !ALLOWED_TX_STATUSES.has(String(status))) {
+      return res.status(400).json({ error: 'Invalid transaction status filter' });
+    }
+    if (dateFrom && !ISO_DATE_RE.test(String(dateFrom))) {
+      return res.status(400).json({ error: 'Invalid dateFrom format (expected YYYY-MM-DD)' });
+    }
+    if (dateTo && !ISO_DATE_RE.test(String(dateTo))) {
+      return res.status(400).json({ error: 'Invalid dateTo format (expected YYYY-MM-DD)' });
+    }
+
+    const safePage = Math.max(1, parseInt(page, 10) || 1);
+    const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const offset = (safePage - 1) * safeLimit;
+    const cleanSearch = typeof search === 'string' ? search.trim().slice(0, 100) : '';
+
     let whereClause = 'WHERE 1=1';
     const params = [];
 
-    if (type)     { params.push(type);     whereClause += ` AND t.tx_type = $${params.length}`; }
-    if (status)   { params.push(status);   whereClause += ` AND t.status = $${params.length}`; }
-    if (dateFrom) { params.push(dateFrom); whereClause += ` AND t.created_at >= $${params.length}`; }
-    if (dateTo)   { params.push(dateTo);   whereClause += ` AND t.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
-    if (search)   { params.push(`%${search}%`); whereClause += ` AND (u.display_name ILIKE $${params.length} OR u.phone_number ILIKE $${params.length})`; }
+    if (type)     { params.push(String(type));     whereClause += ` AND t.tx_type = $${params.length}`; }
+    if (status)   { params.push(String(status));   whereClause += ` AND t.status = $${params.length}`; }
+    if (dateFrom) { params.push(String(dateFrom)); whereClause += ` AND t.created_at >= $${params.length}::DATE`; }
+    if (dateTo)   { params.push(String(dateTo));   whereClause += ` AND t.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
+    if (cleanSearch) {
+      params.push(`%${cleanSearch}%`);
+      whereClause += ` AND (u.display_name ILIKE $${params.length} OR u.phone_number ILIKE $${params.length} OR COALESCE(t.reference_note, '') ILIKE $${params.length})`;
+    }
 
     const countResult = await db.query(`
       SELECT COUNT(*) FROM transactions t
@@ -714,7 +808,7 @@ router.get('/transactions', adminMiddleware, async (req, res) => {
       JOIN users u ON u.id = w.user_id ${whereClause}
     `, params);
 
-    const dataParams = [...params, parseInt(limit), offset];
+    const dataParams = [...params, safeLimit, offset];
     const result = await db.query(`
       SELECT
         t.id, t.tx_type, t.amount, t.direction, t.running_balance,
@@ -731,9 +825,9 @@ router.get('/transactions', adminMiddleware, async (req, res) => {
 
     res.json({
       transactions: result.rows,
-      total: parseInt(countResult.rows[0].count),
-      page: parseInt(page),
-      limit: parseInt(limit)
+      total: parseInt(countResult.rows[0].count, 10),
+      page: safePage,
+      limit: safeLimit
     });
   } catch (err) {
     console.error('Transactions error:', err);
@@ -741,61 +835,104 @@ router.get('/transactions', adminMiddleware, async (req, res) => {
   }
 });
 
-// Single Delete Transaction
-router.delete('/transactions/:id', adminMiddleware, async (req, res) => {
+// Forensic Security Audit Log for Ledger Operations
+router.get('/transactions/audit-logs', adminMiddleware, adminReadLimiter, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, admin_id, admin_username, action, target_type, target_ids,
+              snapshot, ip_address, created_at
+       FROM admin_audit_logs
+       WHERE target_type = 'transaction'
+       ORDER BY created_at DESC
+       LIMIT 50`
+    );
+    res.json({ logs: result.rows });
+  } catch (err) {
+    console.error('Transaction audit log error:', err);
+    res.status(500).json({ error: 'Failed to fetch security audit logs' });
+  }
+});
+
+// Single Delete Transaction (requires admin password confirmation + immutable audit log)
+router.delete('/transactions/:id', adminMiddleware, txMutationLimiter, async (req, res) => {
   const client = await db.getClient();
   try {
     const { id } = req.params;
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, req.body?.confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
+    }
 
     await client.query('BEGIN');
-    await client.query("SET LOCAL app.allow_tx_delete = 'true'");
+    const deletedIds = await deleteTransactionsWithAudit({
+      client,
+      ids: [id],
+      action: 'delete_transaction',
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      req
+    });
 
-    const delRes = await client.query('DELETE FROM transactions WHERE id = $1 RETURNING id', [id]);
-    if (delRes.rowCount === 0) {
+    if (deletedIds.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Transaction not found' });
     }
 
     await client.query('COMMIT');
-    res.json({ success: true, message: 'Transaction deleted successfully', id });
+    res.json({ success: true, message: 'Transaction deleted and logged', id: deletedIds[0] });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('Delete transaction error:', err);
-    res.status(500).json({ error: err.message || 'Failed to delete transaction' });
+    res.status(500).json({ error: 'Failed to delete transaction' });
   } finally {
     client.release();
   }
 });
 
-// Bulk Delete Transactions
-router.post('/transactions/bulk-delete', adminMiddleware, async (req, res) => {
+// Bulk Delete Transactions (requires admin password confirmation + bounded batch + immutable audit log)
+router.post('/transactions/bulk-delete', adminMiddleware, txMutationLimiter, async (req, res) => {
   const client = await db.getClient();
   try {
-    const { ids } = req.body;
+    const { ids, confirmPassword } = req.body || {};
 
     if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ error: 'Please provide an array of transaction IDs to delete.' });
     }
 
-    await client.query('BEGIN');
-    await client.query("SET LOCAL app.allow_tx_delete = 'true'");
+    const uniqueIds = [...new Set(ids)];
+    if (uniqueIds.length > MAX_TX_BULK_DELETE) {
+      return res.status(400).json({ error: `Bulk delete is capped at ${MAX_TX_BULK_DELETE} records per request.` });
+    }
+    if (!uniqueIds.every(isValidUuid)) {
+      return res.status(400).json({ error: 'All transaction IDs must be valid UUIDs.' });
+    }
 
-    const delRes = await client.query(
-      'DELETE FROM transactions WHERE id = ANY($1::uuid[]) RETURNING id',
-      [ids]
-    );
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
+    }
+
+    await client.query('BEGIN');
+    const deletedIds = await deleteTransactionsWithAudit({
+      client,
+      ids: uniqueIds,
+      action: 'bulk_delete_transactions',
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      req
+    });
 
     await client.query('COMMIT');
 
     res.json({
       success: true,
-      deletedCount: delRes.rowCount,
-      deletedIds: delRes.rows.map(r => r.id)
+      deletedCount: deletedIds.length,
+      deletedIds
     });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('Bulk delete transactions error:', err);
-    res.status(500).json({ error: err.message || 'Failed to bulk delete transactions' });
+    res.status(500).json({ error: 'Failed to bulk delete transactions' });
   } finally {
     client.release();
   }
