@@ -52,10 +52,10 @@ const api = {
   getPlayer: (id) => request('GET', `/players/${id}`),
   createPlayer: (data) => request('POST', '/players', data),
   updatePlayer: (id, data) => request('PUT', `/players/${id}`, data),
-  deletePlayer: (id) => request('DELETE', `/players/${id}`),
+  deletePlayer: (id, confirmPassword) => request('DELETE', `/players/${id}`, { confirmPassword }),
   bulkDeletePlayers: (data) => request('POST', '/players/bulk-delete', data),
   updatePlayerStatus: (id, isActive) => request('PUT', `/players/${id}/status`, { isActive }),
-  adjustPlayerBalance: (id, amount, mode) => request('POST', `/players/${id}/adjust-balance`, { amount, mode }),
+  adjustPlayerBalance: (id, amount, mode, confirmPassword) => request('POST', `/players/${id}/adjust-balance`, { amount, mode, confirmPassword }),
 
   // Games
   getGames: (params = {}) => {
@@ -71,7 +71,7 @@ const api = {
 
   // Room Configs
   getRoomConfigs: () => request('GET', '/room-configs'),
-  updateQuota: (groupSize, maxSeatsPerUser) => request('PUT', `/room-configs/quota/${groupSize}`, { maxSeatsPerUser }),
+  updateQuota: (groupSize, maxSeatsPerUser, confirmPassword) => request('PUT', `/room-configs/quota/${groupSize}`, { maxSeatsPerUser, confirmPassword }),
 
   // Transactions & Withdrawals
   getTransactions: (params = {}) => {
@@ -118,11 +118,12 @@ const api = {
 
   // Settings & Admins
   getSettings: () => request('GET', '/settings'),
+  getSettingsAuditLogs: () => request('GET', '/settings/audit-logs'),
   updateSettings: (data) => request('PUT', '/settings', data),
   getAdmins: () => request('GET', '/admins'),
   createAdmin: (data) => request('POST', '/create-admin', data),
   updateAdmin: (id, data) => request('PUT', `/admins/${id}`, data),
-  deleteAdmin: (id) => request('DELETE', `/admins/${id}`),
+  deleteAdmin: (id, confirmPassword) => request('DELETE', `/admins/${id}`, { confirmPassword }),
 };
 
 export default api;

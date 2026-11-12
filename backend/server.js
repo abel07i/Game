@@ -15,16 +15,24 @@ const { isValidUuid, createRateLimiter, securityHeaders, verifyTelebirrReceiver 
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
-  : '*';
+  : (process.env.NODE_ENV === 'production'
+    ? []
+    : ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:5174', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173', 'http://127.0.0.1:5174']);
+
+const corsOrigin = (origin, callback) => {
+  if (!origin) return callback(null, true);
+  if (allowedOrigins.includes(origin)) return callback(null, true);
+  return callback(null, false);
+};
 
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: allowedOrigins } });
+const io = new Server(server, { cors: { origin: corsOrigin } });
 
 app.use(securityHeaders);
-app.use(cors({ origin: allowedOrigins }));
+app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: '100kb' }));
 
 // Rate limiters for auth & financial routes

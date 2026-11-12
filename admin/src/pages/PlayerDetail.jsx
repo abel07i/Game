@@ -1,13 +1,21 @@
 import { useState, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
 import api from "../api";
+import AdminPasswordField from "../components/AdminPasswordField";
 import { ArrowLeft, Wallet, ShieldAlert, ShieldCheck, Award } from "lucide-react";
 
 export default function PlayerDetail() {
   const { id } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [adjustModal, setAdjustModal] = useState({ open: false, amount: "", type: "add" });
+  const [adjustModal, setAdjustModal] = useState({
+    open: false,
+    amount: "",
+    type: "add",
+    confirmPassword: "",
+    submitting: false,
+    error: ""
+  });
 
   const fetchPlayer = () => {
     api.getPlayer(id)
@@ -29,13 +37,20 @@ export default function PlayerDetail() {
 
   const handleAdjust = async (e) => {
     e.preventDefault();
+    if (!adjustModal.confirmPassword.trim()) {
+      setAdjustModal(prev => ({ ...prev, error: "Admin password confirmation is required." }));
+      return;
+    }
+    setAdjustModal(prev => ({ ...prev, submitting: true, error: "" }));
     try {
       const amt = parseFloat(adjustModal.amount);
       const finalAmt = adjustModal.type === "add" ? amt : -amt;
-      await api.adjustPlayerBalance(id, finalAmt, "real");
-      setAdjustModal({ open: false, amount: "", type: "add" });
+      await api.adjustPlayerBalance(id, finalAmt, "real", adjustModal.confirmPassword);
+      setAdjustModal({ open: false, amount: "", type: "add", confirmPassword: "", submitting: false, error: "" });
       fetchPlayer();
-    } catch (err) { alert(err.message); }
+    } catch (err) {
+      setAdjustModal(prev => ({ ...prev, submitting: false, error: err.message || "Adjustment failed" }));
+    }
   };
 
   if (loading) return <div className="loading-overlay"><div className="spinner"></div></div>;
@@ -94,7 +109,7 @@ export default function PlayerDetail() {
         <div className="card">
           <div className="card-header">
             <div className="card-title flex-center gap-2"><Wallet size={18} /> Wallet Overview</div>
-            <button className="btn btn-primary btn-sm" onClick={() => setAdjustModal({ open: true, amount: "", type: "add" })}>
+            <button className="btn btn-primary btn-sm" onClick={() => setAdjustModal({ open: true, amount: "", type: "add", confirmPassword: "", submitting: false, error: "" })}>
               Adjust Balance
             </button>
           </div>
@@ -175,6 +190,11 @@ export default function PlayerDetail() {
             </div>
             <form onSubmit={handleAdjust}>
               <div className="modal-body">
+                {adjustModal.error && (
+                  <div className="p-3 mb-4 rounded" style={{ background: "rgba(239,68,68,0.15)", border: "1px solid var(--danger)", color: "var(--danger)", fontSize: 13 }}>
+                    {adjustModal.error}
+                  </div>
+                )}
                 <div className="form-group">
                   <label className="form-label">Adjustment Type</label>
                   <select
@@ -195,13 +215,23 @@ export default function PlayerDetail() {
                     onChange={e => setAdjustModal({ ...adjustModal, amount: e.target.value })}
                     required
                     min="1"
+                    max="1000000"
                     step="0.01"
                   />
                 </div>
+                <AdminPasswordField
+                  id="player-adjust-confirm-pw"
+                  value={adjustModal.confirmPassword}
+                  submitting={adjustModal.submitting}
+                  helperText="Balance adjustments are recorded in the immutable Security Audit Log."
+                  onChange={val => setAdjustModal(prev => ({ ...prev, confirmPassword: val, error: "" }))}
+                />
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-ghost" onClick={() => setAdjustModal({ ...adjustModal, open: false })}>Cancel</button>
-                <button type="submit" className="btn btn-primary">Confirm Adjustment</button>
+                <button type="button" className="btn btn-ghost" onClick={() => setAdjustModal({ ...adjustModal, open: false })} disabled={adjustModal.submitting}>Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={adjustModal.submitting || !adjustModal.confirmPassword.trim()}>
+                  {adjustModal.submitting ? "Processing..." : "Confirm Adjustment"}
+                </button>
               </div>
             </form>
           </div>

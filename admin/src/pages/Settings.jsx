@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import api from "../api";
 import { useAuth } from "../contexts/AuthContext";
-import { AlertCircle, CheckCircle, UserPlus, Info, Users, Trash2, X, Edit2, Shield, Eye, EyeOff } from "lucide-react";
+import AdminPasswordField from "../components/AdminPasswordField";
+import { AlertCircle, CheckCircle, UserPlus, Info, Users, Trash2, X, Edit2, Shield, ShieldCheck, Lock, History, Eye, EyeOff } from "lucide-react";
 
 export default function Settings() {
   const { refreshAdmin } = useAuth();
@@ -14,7 +15,6 @@ export default function Settings() {
   // Admin creation state
   const [newAdmin, setNewAdmin] = useState({ phoneNumber: "", displayName: "", password: "" });
   const [showNewAdminPw, setShowNewAdminPw] = useState(false);
-  const [creatingAdmin, setCreatingAdmin] = useState(false);
 
   // Admin edit modal state
   const [editAdminModal, setEditAdminModal] = useState({
@@ -24,21 +24,39 @@ export default function Settings() {
     displayName: "",
     password: "",
     isActive: true,
+    confirmPassword: "",
     showPw: false,
     submitting: false,
     error: ""
   });
 
+  // Shared step-up confirmation modal (Create/Delete Admin, Fee Update, Telebirr Settings)
+  const [confirmModal, setConfirmModal] = useState({
+    open: false,
+    title: "",
+    description: "",
+    confirmLabel: "Confirm Action",
+    danger: false,
+    confirmPassword: "",
+    submitting: false,
+    error: "",
+    onConfirm: null
+  });
+
+  // Security Audit Log state
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState("");
+
   // Platform fee state
   const [platformFeeInput, setPlatformFeeInput] = useState("");
-  const [updatingFee, setUpdatingFee] = useState(false);
 
   // Telebirr state
   const [paymentConfig, setPaymentConfig] = useState({ phone: "", name: "", apiKey: "" });
-  const [updatingPayment, setUpdatingPayment] = useState(false);
 
   // Quota modal state
-  const [quotaModal, setQuotaModal] = useState({ open: false, groupSize: null, maxSeats: 2, submitting: false, error: "" });
+  const [quotaModal, setQuotaModal] = useState({ open: false, groupSize: null, maxSeats: 2, confirmPassword: "", submitting: false, error: "" });
 
   const fetchSettings = () => {
     Promise.all([
@@ -59,7 +77,7 @@ export default function Settings() {
           setPaymentConfig({
             phone: setRes.telebirrPhone || '',
             name: setRes.telebirrName || '',
-            apiKey: setRes.verifyEtApiKey || ''
+            apiKey: ''
           });
         }
       })
@@ -68,11 +86,61 @@ export default function Settings() {
 
   useEffect(() => { fetchSettings(); }, []);
 
+  const fetchAuditLogs = async () => {
+    setAuditLoading(true);
+    setAuditError("");
+    try {
+      const res = await api.getSettingsAuditLogs();
+      setAuditLogs(res.logs || []);
+    } catch (err) {
+      setAuditError(err.message || "Failed to load security audit logs");
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+
+  const toggleAuditLogs = () => {
+    const next = !auditOpen;
+    setAuditOpen(next);
+    if (next) fetchAuditLogs();
+  };
+
+  const openStepUpModal = ({ title, description, confirmLabel = "Confirm Action", danger = false, onConfirm }) => {
+    setConfirmModal({
+      open: true,
+      title,
+      description,
+      confirmLabel,
+      danger,
+      confirmPassword: "",
+      submitting: false,
+      error: "",
+      onConfirm
+    });
+  };
+
+  const handleStepUpSubmit = async (e) => {
+    e.preventDefault();
+    if (!confirmModal.confirmPassword.trim()) {
+      setConfirmModal(prev => ({ ...prev, error: "Admin password confirmation is required." }));
+      return;
+    }
+    setConfirmModal(prev => ({ ...prev, submitting: true, error: "" }));
+    try {
+      await confirmModal.onConfirm(confirmModal.confirmPassword);
+      setConfirmModal({ open: false, title: "", description: "", confirmLabel: "Confirm Action", danger: false, confirmPassword: "", submitting: false, error: "", onConfirm: null });
+      if (auditOpen) fetchAuditLogs();
+    } catch (err) {
+      setConfirmModal(prev => ({ ...prev, submitting: false, error: err.message || "Verification failed" }));
+    }
+  };
+
   const openQuotaModal = (groupSize, currentMaxSeats) => {
     setQuotaModal({
       open: true,
       groupSize,
       maxSeats: currentMaxSeats,
+      confirmPassword: "",
       submitting: false,
       error: ""
     });
@@ -88,36 +156,40 @@ export default function Settings() {
       }));
       return;
     }
+    if (!quotaModal.confirmPassword.trim()) {
+      setQuotaModal(prev => ({ ...prev, error: "Admin password confirmation is required." }));
+      return;
+    }
 
     setQuotaModal(prev => ({ ...prev, submitting: true, error: "" }));
     try {
-      await api.updateQuota(quotaModal.groupSize, newMax);
+      await api.updateQuota(quotaModal.groupSize, newMax, quotaModal.confirmPassword);
       setMessage(`Quota for ${quotaModal.groupSize}-player rooms updated to max ${newMax} seats!`);
-      setQuotaModal({ open: false, groupSize: null, maxSeats: 2, submitting: false, error: "" });
+      setQuotaModal({ open: false, groupSize: null, maxSeats: 2, confirmPassword: "", submitting: false, error: "" });
       fetchSettings();
+      if (auditOpen) fetchAuditLogs();
       setTimeout(() => setMessage(""), 4000);
     } catch (err) {
       setQuotaModal(prev => ({ ...prev, submitting: false, error: err.message || "Failed to update quota" }));
     }
   };
 
-  const handleCreateAdmin = async (e) => {
+  const handleCreateAdmin = (e) => {
     e.preventDefault();
-    setCreatingAdmin(true);
     setError("");
-    try {
-      await api.createAdmin(newAdmin);
-      setMessage(`Admin account for ${newAdmin.displayName} created successfully!`);
-      setNewAdmin({ phoneNumber: "", displayName: "", password: "" });
-      setShowNewAdminPw(false);
-      fetchSettings();
-      setTimeout(() => setMessage(""), 5000);
-    } catch (err) {
-      setError(err.message || "Failed to create admin");
-      setTimeout(() => setError(""), 5000);
-    } finally {
-      setCreatingAdmin(false);
-    }
+    openStepUpModal({
+      title: "Confirm New Administrator",
+      description: `Create new admin account for "${newAdmin.displayName}" (${newAdmin.phoneNumber})?`,
+      confirmLabel: "Create Admin",
+      onConfirm: async (confirmPassword) => {
+        await api.createAdmin({ ...newAdmin, confirmPassword });
+        setMessage(`Admin account for ${newAdmin.displayName} created successfully!`);
+        setNewAdmin({ phoneNumber: "", displayName: "", password: "" });
+        setShowNewAdminPw(false);
+        fetchSettings();
+        setTimeout(() => setMessage(""), 5000);
+      }
+    });
   };
 
   const openEditAdminModal = (adm) => {
@@ -128,6 +200,7 @@ export default function Settings() {
       displayName: adm.display_name || "",
       password: "",
       isActive: adm.is_active !== false,
+      confirmPassword: "",
       showPw: false,
       submitting: false,
       error: ""
@@ -148,13 +221,18 @@ export default function Settings() {
       setEditAdminModal(prev => ({ ...prev, error: "New password must be at least 6 characters." }));
       return;
     }
+    if (!editAdminModal.confirmPassword.trim()) {
+      setEditAdminModal(prev => ({ ...prev, error: "Your current admin password confirmation is required." }));
+      return;
+    }
 
     setEditAdminModal(prev => ({ ...prev, submitting: true, error: "" }));
     try {
       const payload = {
         phoneNumber,
         displayName,
-        isActive: editAdminModal.isActive
+        isActive: editAdminModal.isActive,
+        confirmPassword: editAdminModal.confirmPassword
       };
       if (password.length > 0) payload.password = password;
 
@@ -172,12 +250,14 @@ export default function Settings() {
         displayName: "",
         password: "",
         isActive: true,
+        confirmPassword: "",
         showPw: false,
         submitting: false,
         error: ""
       });
       setMessage(`Administrator ${displayName} updated successfully!`);
       fetchSettings();
+      if (auditOpen) fetchAuditLogs();
       setTimeout(() => setMessage(""), 5000);
     } catch (err) {
       setEditAdminModal(prev => ({
@@ -188,7 +268,7 @@ export default function Settings() {
     }
   };
 
-  const handleDeleteAdmin = async (admin) => {
+  const handleDeleteAdmin = (admin) => {
     if (currentAdmin && currentAdmin.id === admin.id) {
       alert("You cannot delete your own admin account.");
       return;
@@ -197,70 +277,149 @@ export default function Settings() {
       alert("Cannot delete the last remaining administrator account.");
       return;
     }
-    if (!window.confirm(`Are you sure you want to remove administrator ${admin.display_name} (${admin.phone_number})?`)) {
-      return;
-    }
-
-    try {
-      await api.deleteAdmin(admin.id);
-      setMessage(`Admin ${admin.display_name} removed successfully.`);
-      fetchSettings();
-      setTimeout(() => setMessage(""), 4000);
-    } catch (err) {
-      setError(err.message || "Failed to delete admin");
-      setTimeout(() => setError(""), 5000);
-    }
+    openStepUpModal({
+      title: "Delete Administrator Account",
+      description: `Permanently remove administrator "${admin.display_name}" (${admin.phone_number})?`,
+      confirmLabel: "Delete Administrator",
+      danger: true,
+      onConfirm: async (confirmPassword) => {
+        await api.deleteAdmin(admin.id, confirmPassword);
+        setMessage(`Admin ${admin.display_name} removed successfully.`);
+        fetchSettings();
+        setTimeout(() => setMessage(""), 4000);
+      }
+    });
   };
 
-  const handleUpdatePayment = async (e) => {
+  const handleUpdatePayment = (e) => {
     e.preventDefault();
-    setUpdatingPayment(true);
     setError("");
-    try {
-      await api.updateSettings({
-        telebirrPhone: paymentConfig.phone,
-        telebirrName: paymentConfig.name,
-        verifyEtApiKey: paymentConfig.apiKey
-      });
-      setMessage("Payment configuration updated successfully!");
-      fetchSettings();
-      setTimeout(() => setMessage(""), 5000);
-    } catch (err) {
-      setError(err.message || "Failed to update payment configuration");
-      setTimeout(() => setError(""), 5000);
-    } finally {
-      setUpdatingPayment(false);
-    }
+    openStepUpModal({
+      title: "Update Telebirr Integration",
+      description: "Save Telebirr receiver and Verify.ET API key changes?",
+      confirmLabel: "Save Configuration",
+      onConfirm: async (confirmPassword) => {
+        const payload = {
+          telebirrPhone: paymentConfig.phone,
+          telebirrName: paymentConfig.name,
+          confirmPassword
+        };
+        if (paymentConfig.apiKey.trim()) {
+          payload.verifyEtApiKey = paymentConfig.apiKey.trim();
+        }
+        await api.updateSettings(payload);
+        setMessage("Payment configuration updated successfully!");
+        fetchSettings();
+        setTimeout(() => setMessage(""), 5000);
+      }
+    });
   };
 
-  const handleUpdateFee = async (e) => {
+  const handleUpdateFee = (e) => {
     e.preventDefault();
     const feeVal = parseFloat(platformFeeInput) / 100;
     if (isNaN(feeVal) || feeVal < 0 || feeVal > 1) {
       alert("Invalid fee percentage (must be between 0 and 100)");
       return;
     }
-    setUpdatingFee(true);
     setError("");
-    try {
-      await api.updateSettings({ platformFee: feeVal });
-      setMessage("Prize commission configuration updated successfully!");
-      fetchSettings();
-      setTimeout(() => setMessage(""), 5000);
-    } catch (err) {
-      setError(err.message || "Failed to update fee");
-      setTimeout(() => setError(""), 5000);
-    } finally {
-      setUpdatingFee(false);
-    }
+    openStepUpModal({
+      title: "Update Platform Commission Fee",
+      description: `Change platform commission rate to ${(feeVal * 100).toFixed(1)}%?`,
+      confirmLabel: "Update Fee",
+      onConfirm: async (confirmPassword) => {
+        await api.updateSettings({ platformFee: feeVal, confirmPassword });
+        setMessage("Prize commission configuration updated successfully!");
+        fetchSettings();
+        setTimeout(() => setMessage(""), 5000);
+      }
+    });
   };
 
   if (loading) return <div className="loading-overlay"><div className="spinner"></div></div>;
 
   return (
     <div className="card" style={{ maxWidth: 920 }}>
-      <div className="card-header"><div className="card-title">Platform Settings & Security</div></div>
+      <div className="card-header flex-between" style={{ flexWrap: "wrap", gap: 12 }}>
+        <div className="card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <ShieldCheck size={18} color="var(--success)" /> Platform Settings &amp; Security
+        </div>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={toggleAuditLogs}
+          style={{ display: "flex", alignItems: "center", gap: 6 }}
+        >
+          <History size={14} /> {auditOpen ? "Hide Security Audit Log" : "Security Audit Log"}
+        </button>
+      </div>
       <div className="card-body">
+        <div
+          style={{
+            marginBottom: 20,
+            padding: "12px 16px",
+            borderRadius: "var(--radius-sm)",
+            background: "rgba(34,197,94,0.08)",
+            border: "1px solid rgba(34,197,94,0.28)",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            fontSize: 13,
+            color: "var(--text-secondary)"
+          }}
+        >
+          <Shield size={16} color="var(--success)" style={{ flexShrink: 0 }} />
+          <span>
+            <strong style={{ color: "var(--text-primary)" }}>Protected Settings:</strong> All fee, integration, quota, and administrator account changes require password re-authentication and are written to the immutable audit trail.
+          </span>
+        </div>
+
+        {auditOpen && (
+          <div style={{ marginBottom: 24, padding: 16, borderRadius: "var(--radius-sm)", background: "var(--bg-glass)", border: "1px solid var(--border)" }}>
+            <div className="flex-between mb-3">
+              <div style={{ fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
+                <History size={15} color="var(--accent)" /> Recent Security &amp; Configuration Audit Logs
+              </div>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={fetchAuditLogs} disabled={auditLoading}>
+                {auditLoading ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
+            {auditError && (
+              <div style={{ marginBottom: 12, padding: 10, borderRadius: 6, background: "var(--danger-light)", border: "1px solid var(--danger)", color: "var(--danger)", fontSize: 12 }}>
+                {auditError}
+              </div>
+            )}
+            {auditLoading ? (
+              <div style={{ fontSize: 13, color: "var(--text-muted)" }}>Loading audit trail...</div>
+            ) : auditLogs.length === 0 ? (
+              <div style={{ fontSize: 13, color: "var(--text-muted)" }}>No recorded settings or security events yet.</div>
+            ) : (
+              <div className="table-wrapper" style={{ maxHeight: 260, overflowY: "auto" }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Admin</th>
+                      <th>Action</th>
+                      <th>Target</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {auditLogs.map((log) => (
+                      <tr key={log.id}>
+                        <td style={{ fontSize: 12, whiteSpace: "nowrap" }}>{new Date(log.created_at).toLocaleString()}</td>
+                        <td style={{ fontSize: 12 }}>{log.admin_name || log.admin_phone || "Admin"}</td>
+                        <td style={{ fontSize: 12, fontWeight: 600 }}>{log.action}</td>
+                        <td style={{ fontSize: 12, color: "var(--text-muted)" }}>{log.target_type}{log.target_id ? `:${log.target_id}` : ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
         {message && (
           <div style={{ marginBottom: 24, padding: 16, borderRadius: "var(--radius-sm)", background: "var(--success-light)", border: "1px solid var(--success)", color: "var(--success)", display: "flex", alignItems: "center", gap: 8 }}>
             <CheckCircle size={18} /> {message}
@@ -273,7 +432,7 @@ export default function Settings() {
         )}
 
         {/* Prize Management Form */}
-        <h3 style={{ fontWeight: 600, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}><Info size={18} color="var(--accent)"/> Prize & Platform Commission</h3>
+        <h3 style={{ fontWeight: 600, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}><Info size={18} color="var(--accent)"/> Prize &amp; Platform Commission</h3>
         <p style={{ color: "var(--text-muted)", fontSize: 14, marginBottom: 20 }}>Configure the percentage of the gross pool that the platform takes as commission. The remainder goes directly to the winner.</p>
         
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
@@ -292,8 +451,8 @@ export default function Settings() {
             <label style={{ fontSize: 13, marginBottom: 4, display: "block", color: "var(--text-secondary)" }}>New Platform Fee (%)</label>
             <input type="number" className="form-input" min="0" max="100" required value={platformFeeInput} onChange={e => setPlatformFeeInput(e.target.value)} />
           </div>
-          <button type="submit" className="btn btn-primary" disabled={updatingFee} style={{ padding: "11px 20px" }}>
-             {updatingFee ? "Saving..." : "Update Fee"}
+          <button type="submit" className="btn btn-primary" style={{ padding: "11px 20px" }}>
+             Update Fee
           </button>
         </form>
 
@@ -311,11 +470,21 @@ export default function Settings() {
               <input type="text" className="form-input" required placeholder="Receiver Name" value={paymentConfig.name} onChange={e => setPaymentConfig({...paymentConfig, name: e.target.value})} />
             </div>
             <div style={{ flex: '1 1 100%' }}>
-              <label style={{ fontSize: 13, marginBottom: 4, display: "block", color: "var(--text-secondary)" }}>Verify.ET API Key</label>
-              <input type="text" className="form-input" required placeholder="VERIFY_BANK_ET_..." value={paymentConfig.apiKey} onChange={e => setPaymentConfig({...paymentConfig, apiKey: e.target.value})} />
+              <label style={{ fontSize: 13, marginBottom: 4, display: "block", color: "var(--text-secondary)" }}>
+                Verify.ET API Key {data.settings?.hasVerifyEtApiKey && <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(masked for security — leave blank to keep current key)</span>}
+              </label>
+              <input
+                type="password"
+                className="form-input"
+                autoComplete="off"
+                required={!data.settings?.hasVerifyEtApiKey}
+                placeholder={data.settings?.hasVerifyEtApiKey ? `Configured (${data.settings.verifyEtApiKeyMasked}) — enter new key to replace` : "VERIFY_BANK_ET_..."}
+                value={paymentConfig.apiKey}
+                onChange={e => setPaymentConfig({...paymentConfig, apiKey: e.target.value})}
+              />
             </div>
-            <button type="submit" className="btn btn-primary" disabled={updatingPayment} style={{ padding: "11px 20px" }}>
-               {updatingPayment ? "Saving..." : "Save Configuration"}
+            <button type="submit" className="btn btn-primary" style={{ padding: "11px 20px" }}>
+               Save Configuration
             </button>
           </form>
         </div>
@@ -438,8 +607,8 @@ export default function Settings() {
                   </button>
                 </div>
               </div>
-              <button type="submit" className="btn btn-primary" disabled={creatingAdmin} style={{ padding: "11px 20px" }}>
-                 {creatingAdmin ? "Creating..." : "Create Admin"}
+              <button type="submit" className="btn btn-primary" style={{ padding: "11px 20px" }}>
+                 Create Admin
               </button>
             </form>
           </div>
@@ -490,7 +659,7 @@ export default function Settings() {
           <div className="card" style={{ maxWidth: 440, width: "100%", border: "1px solid var(--border)", boxShadow: "0 20px 40px rgba(0,0,0,0.6)" }}>
             <div className="card-header flex-between">
               <div className="card-title">Edit Seat Quota ({quotaModal.groupSize} Players)</div>
-              <button className="btn btn-ghost btn-sm" onClick={() => setQuotaModal({ open: false, groupSize: null, maxSeats: 2, submitting: false, error: "" })}>
+              <button className="btn btn-ghost btn-sm" onClick={() => setQuotaModal({ open: false, groupSize: null, maxSeats: 2, confirmPassword: "", submitting: false, error: "" })}>
                 <X size={16} />
               </button>
             </div>
@@ -518,19 +687,25 @@ export default function Settings() {
                     Must be at least 1 and less than total room size ({quotaModal.groupSize}).
                   </div>
                 </div>
+                <AdminPasswordField
+                  id="quota-confirm-pw"
+                  value={quotaModal.confirmPassword}
+                  onChange={val => setQuotaModal({ ...quotaModal, confirmPassword: val })}
+                  submitting={quotaModal.submitting}
+                />
               </div>
               <div className="card-footer flex justify-end gap-3" style={{ padding: "16px 24px", borderTop: "1px solid var(--border)" }}>
                 <button
                   type="button"
                   className="btn btn-ghost btn-sm"
-                  onClick={() => setQuotaModal({ open: false, groupSize: null, maxSeats: 2, submitting: false, error: "" })}
+                  onClick={() => setQuotaModal({ open: false, groupSize: null, maxSeats: 2, confirmPassword: "", submitting: false, error: "" })}
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   className="btn btn-primary btn-sm"
-                  disabled={quotaModal.submitting}
+                  disabled={quotaModal.submitting || !quotaModal.confirmPassword.trim()}
                 >
                   {quotaModal.submitting ? "Saving..." : "Save Quota"}
                 </button>
@@ -620,7 +795,7 @@ export default function Settings() {
                   </div>
                 </div>
 
-                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text-secondary)", cursor: (currentAdmin && currentAdmin.id === editAdminModal.id) ? "not-allowed" : "pointer" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text-secondary)", marginBottom: 16, cursor: (currentAdmin && currentAdmin.id === editAdminModal.id) ? "not-allowed" : "pointer" }}>
                   <input
                     type="checkbox"
                     checked={editAdminModal.isActive}
@@ -629,6 +804,13 @@ export default function Settings() {
                   />
                   <span>Account Active {currentAdmin && currentAdmin.id === editAdminModal.id ? "(cannot deactivate current session)" : ""}</span>
                 </label>
+
+                <AdminPasswordField
+                  id="edit-admin-confirm-pw"
+                  value={editAdminModal.confirmPassword}
+                  onChange={val => setEditAdminModal(prev => ({ ...prev, confirmPassword: val }))}
+                  submitting={editAdminModal.submitting}
+                />
               </div>
               <div className="card-footer flex justify-end gap-3" style={{ padding: "16px 24px", borderTop: "1px solid var(--border)" }}>
                 <button
@@ -641,9 +823,69 @@ export default function Settings() {
                 <button
                   type="submit"
                   className="btn btn-primary btn-sm"
-                  disabled={editAdminModal.submitting}
+                  disabled={editAdminModal.submitting || !editAdminModal.confirmPassword.trim()}
                 >
                   {editAdminModal.submitting ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Shared Step-Up Confirmation Modal */}
+      {confirmModal.open && (
+        <div className="modal-overlay" style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)",
+          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999, padding: 16
+        }}>
+          <div className="card" style={{ maxWidth: 440, width: "100%", border: "1px solid var(--border)", boxShadow: "0 20px 40px rgba(0,0,0,0.6)" }}>
+            <div className="card-header flex-between">
+              <div className="card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Lock size={16} color={confirmModal.danger ? "var(--danger)" : "var(--accent)"} />
+                {confirmModal.title}
+              </div>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setConfirmModal(prev => ({ ...prev, open: false, confirmPassword: "", error: "" }))}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <form onSubmit={handleStepUpSubmit}>
+              <div className="card-body">
+                {confirmModal.error && (
+                  <div style={{ marginBottom: 16, padding: 12, borderRadius: 6, background: "var(--danger-light)", border: "1px solid var(--danger)", color: "var(--danger)", fontSize: 13 }}>
+                    {confirmModal.error}
+                  </div>
+                )}
+                {confirmModal.description && (
+                  <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 16 }}>
+                    {confirmModal.description}
+                  </p>
+                )}
+                <AdminPasswordField
+                  id="settings-action-confirm-pw"
+                  value={confirmModal.confirmPassword}
+                  onChange={val => setConfirmModal(prev => ({ ...prev, confirmPassword: val }))}
+                  submitting={confirmModal.submitting}
+                />
+              </div>
+              <div className="card-footer flex justify-end gap-3" style={{ padding: "16px 24px", borderTop: "1px solid var(--border)" }}>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => setConfirmModal(prev => ({ ...prev, open: false, confirmPassword: "", error: "" }))}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className={`btn ${confirmModal.danger ? "btn-danger" : "btn-primary"} btn-sm`}
+                  disabled={confirmModal.submitting || !confirmModal.confirmPassword.trim()}
+                >
+                  {confirmModal.submitting ? "Verifying..." : confirmModal.confirmLabel}
                 </button>
               </div>
             </form>

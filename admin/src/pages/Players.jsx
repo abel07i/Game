@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import api from "../api";
+import AdminPasswordField from "../components/AdminPasswordField";
 import { Search, Eye, ShieldAlert, ShieldCheck, Edit, Trash2, UserPlus, X } from "lucide-react";
 
 export default function Players() {
@@ -23,6 +24,14 @@ export default function Players() {
   const [formData, setFormData] = useState({ phoneNumber: "", displayName: "", password: "", telegramId: "" });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [deleteModal, setDeleteModal] = useState({
+    open: false,
+    isBulk: false,
+    player: null,
+    confirmPassword: "",
+    submitting: false,
+    error: ""
+  });
   
   // Bulk Selection State
   const [selectedPlayers, setSelectedPlayers] = useState([]);
@@ -65,25 +74,34 @@ export default function Players() {
     } catch (err) { alert(err.message); }
   };
 
-  const handleDelete = async (player) => {
-    if (!window.confirm(`Are you sure you want to DELETE ${player.display_name}? This action cannot be undone.`)) return;
-    try {
-      await api.deletePlayer(player.id);
-      fetchPlayers();
-      setSelectedPlayers(prev => prev.filter(id => id !== player.id));
-    } catch (err) { alert(err.message); }
+  const handleDelete = (player) => {
+    setDeleteModal({ open: true, isBulk: false, player, confirmPassword: "", submitting: false, error: "" });
   };
 
-  const handleBulkDelete = async () => {
+  const handleBulkDelete = () => {
     if (selectedPlayers.length === 0) return;
-    if (!window.confirm(`Are you sure you want to DELETE ${selectedPlayers.length} selected players? This action cannot be undone.`)) return;
-    
+    setDeleteModal({ open: true, isBulk: true, player: null, confirmPassword: "", submitting: false, error: "" });
+  };
+
+  const confirmDeletePlayer = async (e) => {
+    e.preventDefault();
+    if (!deleteModal.confirmPassword.trim()) {
+      setDeleteModal(prev => ({ ...prev, error: "Admin password confirmation is required." }));
+      return;
+    }
+    setDeleteModal(prev => ({ ...prev, submitting: true, error: "" }));
     try {
-      await api.bulkDeletePlayers({ ids: selectedPlayers });
+      if (deleteModal.isBulk) {
+        await api.bulkDeletePlayers({ ids: selectedPlayers, confirmPassword: deleteModal.confirmPassword });
+        setSelectedPlayers([]);
+      } else if (deleteModal.player) {
+        await api.deletePlayer(deleteModal.player.id, deleteModal.confirmPassword);
+        setSelectedPlayers(prev => prev.filter(id => id !== deleteModal.player.id));
+      }
+      setDeleteModal({ open: false, isBulk: false, player: null, confirmPassword: "", submitting: false, error: "" });
       fetchPlayers();
-      setSelectedPlayers([]);
     } catch (err) {
-      alert(err.message);
+      setDeleteModal(prev => ({ ...prev, submitting: false, error: err.message || "Delete failed" }));
     }
   };
 
@@ -407,6 +425,50 @@ export default function Players() {
                 <button type="button" className="btn btn-ghost" onClick={() => setModalOpen(false)}>Cancel</button>
                 <button type="submit" className="btn btn-primary" disabled={submitting}>
                   {submitting ? "Saving..." : "Save Player"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {deleteModal.open && (
+        <div className="modal-overlay" onClick={() => !deleteModal.submitting && setDeleteModal(prev => ({ ...prev, open: false }))}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 440 }}>
+            <div className="modal-header">
+              <div className="modal-title text-danger">
+                {deleteModal.isBulk ? `Delete ${selectedPlayers.length} Selected Players` : `Delete Player`}
+              </div>
+              <button type="button" className="btn btn-ghost btn-sm" disabled={deleteModal.submitting} onClick={() => setDeleteModal(prev => ({ ...prev, open: false }))}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={confirmDeletePlayer}>
+              <div className="modal-body">
+                {deleteModal.error && (
+                  <div style={{ padding: 12, borderRadius: 8, background: "var(--danger-light)", color: "var(--danger)", border: "1px solid var(--danger)", marginBottom: 14, fontSize: 13 }}>
+                    {deleteModal.error}
+                  </div>
+                )}
+                <p className="text-secondary text-sm">
+                  {deleteModal.isBulk
+                    ? `Are you sure you want to permanently delete ${selectedPlayers.length} selected player account(s)?`
+                    : `Are you sure you want to permanently delete player "${deleteModal.player?.display_name}"?`}
+                </p>
+                <AdminPasswordField
+                  id="player-delete-confirm-pw"
+                  value={deleteModal.confirmPassword}
+                  submitting={deleteModal.submitting}
+                  helperText="Player deletions are recorded in the immutable Security Audit Log."
+                  onChange={val => setDeleteModal(prev => ({ ...prev, confirmPassword: val, error: "" }))}
+                />
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-ghost" disabled={deleteModal.submitting} onClick={() => setDeleteModal(prev => ({ ...prev, open: false }))}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-danger" disabled={deleteModal.submitting || !deleteModal.confirmPassword.trim()}>
+                  {deleteModal.submitting ? "Deleting..." : "Confirm Delete"}
                 </button>
               </div>
             </form>

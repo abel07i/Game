@@ -25,6 +25,13 @@ const withdrawalMutationLimiter = createRateLimiter({
   message: 'Too many withdrawal modification attempts. Please wait 15 minutes.'
 });
 
+const adminPrivilegedLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  keyGenerator: (req) => `${req.ip}:${req.admin?.id || 'anon'}:priv`,
+  message: 'Too many sensitive administrative actions. Please wait 15 minutes.'
+});
+
 const adminReadLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   max: 120,
@@ -38,8 +45,20 @@ const ALLOWED_TX_TYPES = new Set([
 ]);
 const ALLOWED_TX_STATUSES = new Set(['pending', 'completed', 'failed', 'reversed']);
 const ALLOWED_WITHDRAWAL_STATUSES = new Set(['pending', 'approved', 'rejected', 'cancelled']);
+const ALLOWED_ROOM_STATUSES = new Set(['open', 'drawing', 'settled', 'refunded', 'cancelled']);
+const ALLOWED_TIERS = new Set(['starter', 'bronze', 'silver', 'gold']);
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_BULK_ITEMS = 100;
+
+function validateDateRange(dateFrom, dateTo) {
+  if (dateFrom && !ISO_DATE_RE.test(String(dateFrom))) {
+    return { ok: false, error: 'Invalid dateFrom format (expected YYYY-MM-DD)' };
+  }
+  if (dateTo && !ISO_DATE_RE.test(String(dateTo))) {
+    return { ok: false, error: 'Invalid dateTo format (expected YYYY-MM-DD)' };
+  }
+  return { ok: true };
+}
 
 function validateUuidArray(ids, label = 'IDs') {
   if (!Array.isArray(ids) || ids.length === 0) {
@@ -291,11 +310,26 @@ router.get('/auth/me', adminMiddleware, async (req, res) => {
   }
 });
 
-router.put('/auth/profile', adminMiddleware, async (req, res) => {
+router.put('/auth/profile', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
-    const { displayName, password } = req.body;
+    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const confirmPassword = req.body?.confirmPassword;
+
+    if (!displayName || displayName.length > 50) {
+      return res.status(400).json({ error: 'Display name is required (max 50 characters)' });
+    }
+    if (password.length > 0 && password.trim().length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    }
+
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
+    }
+
     let query, values;
-    if (password) {
+    if (password.length > 0) {
       const hash = await hashPassword(password);
       query = `UPDATE users SET display_name=$1, password_hash=$2, updated_at=NOW() WHERE id=$3 RETURNING display_name`;
       values = [displayName, hash, req.admin.id];
@@ -304,9 +338,19 @@ router.put('/auth/profile', adminMiddleware, async (req, res) => {
       values = [displayName, req.admin.id];
     }
     const result = await db.query(query, values);
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: displayName,
+      action: 'update_own_profile',
+      targetType: 'admin',
+      targetIds: [req.admin.id],
+      snapshot: [{ id: req.admin.id, displayName, passwordChanged: password.length > 0 }],
+      req
+    });
     res.json({ success: true, name: result.rows[0].display_name });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('Admin profile update error:', err);
+    res.status(500).json({ error: 'Failed to update admin profile' });
   }
 });
 
@@ -405,7 +449,7 @@ router.get('/dashboard/recent-games', adminMiddleware, adminReadLimiter, async (
   }
 });
 
-router.get('/dashboard/revenue-chart', adminMiddleware, async (req, res) => {
+router.get('/dashboard/revenue-chart', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const result = await db.query(`
       SELECT
@@ -427,7 +471,7 @@ router.get('/dashboard/revenue-chart', adminMiddleware, async (req, res) => {
 
 // ── Player Management ─────────────────────────────────────────────────────────
 
-router.get('/players', adminMiddleware, async (req, res) => {
+router.get('/players', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const {
       search,
@@ -442,12 +486,13 @@ router.get('/players', adminMiddleware, async (req, res) => {
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
     const offset = (pageNum - 1) * limitNum;
+    const cleanSearch = typeof search === 'string' ? search.trim().slice(0, 100) : '';
 
     let whereClause = `WHERE u.role = 'player'`;
     const params = [];
 
-    if (search) {
-      params.push(`%${search}%`);
+    if (cleanSearch) {
+      params.push(`%${cleanSearch}%`);
       whereClause += ` AND (u.display_name ILIKE $${params.length} OR u.phone_number ILIKE $${params.length})`;
     }
     if (status === 'active') {
@@ -529,15 +574,24 @@ router.get('/players', adminMiddleware, async (req, res) => {
   }
 });
 
-router.post('/players', adminMiddleware, async (req, res) => {
+router.post('/players', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
-    const { phoneNumber, displayName, password, telegramId } = req.body;
+    const phoneNumber = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
+    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const telegramId = typeof req.body?.telegramId === 'string' ? req.body.telegramId.trim() : '';
+
     if (!phoneNumber || !displayName || !password) return res.status(400).json({ error: 'All fields required' });
+    if (phoneNumber.length > 20 || displayName.length > 50) {
+      return res.status(400).json({ error: 'Phone number (max 20) or display name (max 50) too long' });
+    }
+    if (password.trim().length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
 
     const existing = await db.query(`SELECT id FROM users WHERE phone_number = $1`, [phoneNumber]);
     if (existing.rows.length > 0) return res.status(400).json({ error: 'Phone number already registered' });
 
-    // Check if telegram_id is already in use (if provided)
     if (telegramId) {
       const telegramCheck = await db.query('SELECT id FROM users WHERE telegram_id = $1', [telegramId]);
       if (telegramCheck.rows.length > 0)
@@ -553,27 +607,37 @@ router.post('/players', adminMiddleware, async (req, res) => {
     await db.query(`INSERT INTO wallets (user_id, mode) VALUES ($1, 'real'), ($1, 'demo')`, [result.rows[0].id]);
     res.json({ success: true, player: result.rows[0] });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('Create player error:', err);
+    res.status(500).json({ error: 'Failed to create player account' });
   }
 });
 
-router.put('/players/:id', adminMiddleware, async (req, res) => {
+router.put('/players/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const { id } = req.params;
-    const { phoneNumber, displayName, password, telegramId } = req.body;
+    const phoneNumber = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
+    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const telegramId = typeof req.body?.telegramId === 'string' ? req.body.telegramId.trim() : '';
+
     if (!phoneNumber || !displayName) return res.status(400).json({ error: 'Phone and Name required' });
+    if (phoneNumber.length > 20 || displayName.length > 50) {
+      return res.status(400).json({ error: 'Phone number (max 20) or display name (max 50) too long' });
+    }
+    if (password.length > 0 && password.trim().length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    }
 
     const existing = await db.query(`SELECT id FROM users WHERE phone_number = $1 AND id != $2`, [phoneNumber, id]);
     if (existing.rows.length > 0) return res.status(400).json({ error: 'Phone number already in use by another user' });
 
-    // Check if telegram_id is already in use by another user (if provided)
     if (telegramId) {
       const telegramCheck = await db.query('SELECT id FROM users WHERE telegram_id = $1 AND id != $2', [telegramId, id]);
       if (telegramCheck.rows.length > 0)
         return res.status(400).json({ error: 'Telegram ID already linked to another account' });
     }
 
-    if (password) {
+    if (password.length > 0) {
       const hash = await hashPassword(password);
       await db.query(`UPDATE users SET phone_number = $1, display_name = $2, password_hash = $3, telegram_id = $4, updated_at = NOW() WHERE id = $5 AND role = 'player'`, [phoneNumber, displayName, hash, telegramId || null, id]);
     } else {
@@ -581,42 +645,92 @@ router.put('/players/:id', adminMiddleware, async (req, res) => {
     }
     res.json({ success: true });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('Update player error:', err);
+    res.status(500).json({ error: 'Failed to update player account' });
   }
 });
 
-router.delete('/players/:id', adminMiddleware, async (req, res) => {
+router.delete('/players/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const { id } = req.params;
-    await db.query(`DELETE FROM users WHERE id = $1 AND role = 'player'`, [id]);
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, req.body?.confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
+    }
+
+    const delRes = await db.query(
+      `DELETE FROM users WHERE id = $1 AND role = 'player' RETURNING id, display_name, phone_number`,
+      [id]
+    );
+    if (delRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Player not found' });
+    }
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      action: 'delete_player',
+      targetType: 'player',
+      targetIds: [id],
+      snapshot: delRes.rows,
+      req
+    });
     res.json({ success: true });
   } catch (err) {
+    console.error('Delete player error:', err);
     res.status(400).json({ error: 'Cannot delete player. They may have active tickets or financial records.' });
   }
 });
 
-router.post('/players/bulk-delete', adminMiddleware, async (req, res) => {
+router.post('/players/bulk-delete', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
+  const client = await db.getClient();
   try {
-    const { ids } = req.body;
-    if (!ids || !Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({ error: 'No player IDs provided' });
+    const { ids, confirmPassword } = req.body || {};
+    const idCheck = validateUuidArray(ids, 'player IDs');
+    if (!idCheck.ok) {
+      return res.status(400).json({ error: idCheck.error });
     }
-    
-    // We use ANY($1) to pass an array of UUIDs to postgres
-    await db.query(`DELETE FROM users WHERE id = ANY($1) AND role = 'player'`, [ids]);
-    res.json({ success: true, count: ids.length });
+
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
+    }
+
+    await client.query('BEGIN');
+    const delRes = await client.query(
+      `DELETE FROM users WHERE id = ANY($1::uuid[]) AND role = 'player' RETURNING id, display_name, phone_number`,
+      [idCheck.uniqueIds]
+    );
+    if (delRes.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'No matching players found to delete' });
+    }
+    await recordAdminAudit(client, {
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      action: 'bulk_delete_players',
+      targetType: 'player',
+      targetIds: delRes.rows.map(r => r.id),
+      snapshot: delRes.rows,
+      req
+    });
+    await client.query('COMMIT');
+    res.json({ success: true, count: delRes.rowCount });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Bulk delete players error:', err);
     res.status(400).json({ error: 'Cannot delete some players. They may have active tickets or financial records.' });
+  } finally {
+    client.release();
   }
 });
 
-router.get('/players/:id', adminMiddleware, async (req, res) => {
+router.get('/players/:id', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const { id } = req.params;
     const [player, wallets, tickets, transactions] = await Promise.all([
       db.query(`
         SELECT id, display_name, phone_number, is_active, role, created_at, last_login_at
-        FROM users WHERE id = $1
+        FROM users WHERE id = $1 AND role = 'player'
       `, [id]),
       db.query(`
         SELECT mode, balance, total_deposited, total_withdrawn, total_wagered, total_won
@@ -654,26 +768,57 @@ router.get('/players/:id', adminMiddleware, async (req, res) => {
   }
 });
 
-router.put('/players/:id/status', adminMiddleware, async (req, res) => {
+router.put('/players/:id/status', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const { id } = req.params;
-    const { isActive } = req.body;
-    await db.query(
-      `UPDATE users SET is_active = $1, updated_at = NOW() WHERE id = $2 AND role = 'player'`,
+    const { isActive } = req.body || {};
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ error: 'isActive boolean is required' });
+    }
+    const upd = await db.query(
+      `UPDATE users SET is_active = $1, updated_at = NOW() WHERE id = $2 AND role = 'player' RETURNING id, display_name, is_active`,
       [isActive, id]
     );
+    if (upd.rowCount === 0) {
+      return res.status(404).json({ error: 'Player not found' });
+    }
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: req.admin.email || null,
+      action: isActive ? 'unblock_player' : 'block_player',
+      targetType: 'player',
+      targetIds: [id],
+      snapshot: upd.rows,
+      req
+    });
     res.json({ success: true });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('Player status error:', err);
+    res.status(500).json({ error: 'Failed to update player status' });
   }
 });
 
-router.post('/players/:id/adjust-balance', adminMiddleware, async (req, res) => {
+router.post('/players/:id/adjust-balance', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const { id } = req.params;
-    const { amount, mode = 'real' } = req.body;
-    const parsedAmount = parseFloat(amount);
-    if (isNaN(parsedAmount) || parsedAmount === 0) return res.status(400).json({ error: 'Invalid amount' });
+    const { amount, mode = 'real', confirmPassword } = req.body || {};
+    if (!['real', 'demo'].includes(mode)) {
+      return res.status(400).json({ error: 'Invalid wallet mode (must be real or demo)' });
+    }
+    const parsedAmount = Number(amount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount === 0 || Math.abs(parsedAmount) > 1000000) {
+      return res.status(400).json({ error: 'Amount must be between -1,000,000 and +1,000,000 ETB (non-zero)' });
+    }
+
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
+    }
+
+    const playerCheck = await db.query(`SELECT id, display_name FROM users WHERE id = $1 AND role = 'player'`, [id]);
+    if (playerCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Player not found' });
+    }
 
     if (parsedAmount > 0) {
       const dRes = await db.query('SELECT * FROM fn_wallet_deposit($1, $2, $3, $4)', [id, parsedAmount, mode, null]);
@@ -688,28 +833,51 @@ router.post('/players/:id/adjust-balance', adminMiddleware, async (req, res) => 
     }
 
     const newBal = await db.query(`SELECT balance FROM wallets WHERE user_id=$1 AND mode=$2`, [id, mode]);
-    res.json({ success: true, newBalance: parseFloat(newBal.rows[0]?.balance || 0) });
+    const finalBalance = parseFloat(newBal.rows[0]?.balance || 0);
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      action: parsedAmount > 0 ? 'credit_player_balance' : 'debit_player_balance',
+      targetType: 'wallet',
+      targetIds: [id],
+      snapshot: [{ userId: id, playerName: playerCheck.rows[0].display_name, mode, amount: parsedAmount, newBalance: finalBalance }],
+      req
+    });
+
+    res.json({ success: true, newBalance: finalBalance });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('Adjust balance error:', err);
+    res.status(500).json({ error: 'Failed to adjust player balance' });
   }
 });
 
 // ── Game Management ───────────────────────────────────────────────────────────
 
-router.get('/games', adminMiddleware, async (req, res) => {
+router.get('/games', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const { status, tier, page = 1, limit = 20, search } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    if (status && !ALLOWED_ROOM_STATUSES.has(String(status))) {
+      return res.status(400).json({ error: 'Invalid room status filter' });
+    }
+    if (tier && !ALLOWED_TIERS.has(String(tier))) {
+      return res.status(400).json({ error: 'Invalid tier filter' });
+    }
+
+    const safePage = Math.max(1, parseInt(page, 10) || 1);
+    const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const offset = (safePage - 1) * safeLimit;
+    const cleanSearch = typeof search === 'string' ? search.trim().slice(0, 30) : '';
+
     let whereClause = 'WHERE 1=1';
     const params = [];
 
-    if (status) { params.push(status); whereClause += ` AND r.status = $${params.length}`; }
-    if (tier)   { params.push(tier);   whereClause += ` AND r.tier = $${params.length}`; }
-    if (search) { params.push(search); whereClause += ` AND r.room_number::TEXT = $${params.length}`; }
+    if (status) { params.push(String(status)); whereClause += ` AND r.status = $${params.length}`; }
+    if (tier)   { params.push(String(tier));   whereClause += ` AND r.tier = $${params.length}`; }
+    if (cleanSearch) { params.push(cleanSearch); whereClause += ` AND r.room_number::TEXT = $${params.length}`; }
 
     const countResult = await db.query(`SELECT COUNT(*) FROM rooms r ${whereClause}`, params);
 
-    const dataParams = [...params, parseInt(limit), offset];
+    const dataParams = [...params, safeLimit, offset];
     const result = await db.query(`
       SELECT
         r.id, r.room_number, r.tier, r.target_jackpot, r.group_size,
@@ -726,16 +894,17 @@ router.get('/games', adminMiddleware, async (req, res) => {
 
     res.json({
       games: result.rows,
-      total: parseInt(countResult.rows[0].count),
-      page: parseInt(page),
-      limit: parseInt(limit)
+      total: parseInt(countResult.rows[0].count, 10),
+      page: safePage,
+      limit: safeLimit
     });
   } catch (err) {
+    console.error('Fetch games error:', err);
     res.status(500).json({ error: 'Failed to fetch games' });
   }
 });
 
-router.get('/games/:id', adminMiddleware, async (req, res) => {
+router.get('/games/:id', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const { id } = req.params;
     const [game, tickets] = await Promise.all([
@@ -763,11 +932,18 @@ router.get('/games/:id', adminMiddleware, async (req, res) => {
   }
 });
 
-router.post('/games/:id/refund', adminMiddleware, async (req, res) => {
+router.post('/games/:id/refund', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const roomId = req.params.id;
+    const roomRes = await db.query(`SELECT id, room_number, status FROM rooms WHERE id = $1`, [roomId]);
+    if (roomRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Game room not found' });
+    }
+    if (!['open', 'drawing'].includes(roomRes.rows[0].status)) {
+      return res.status(400).json({ error: `Cannot refund room in status "${roomRes.rows[0].status}"` });
+    }
+
     const roomManager = require('./roomManager');
-    
     await db.query('SELECT * FROM fn_refund_room($1)', [roomId]);
     await db.query(`UPDATE rooms SET status = 'refunded' WHERE id = $1`, [roomId]);
     
@@ -776,14 +952,25 @@ router.post('/games/:id/refund', adminMiddleware, async (req, res) => {
       roomManager.io.emit('room:state_update', roomManager.getRoomSummaries());
     }
     roomManager.rooms.delete(roomId);
+
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: req.admin.email || null,
+      action: 'refund_game',
+      targetType: 'game',
+      targetIds: [roomId],
+      snapshot: roomRes.rows,
+      req
+    });
     
     res.json({ success: true, message: 'Room manually refunded successfully' });
   } catch (err) {
-    res.status(500).json({ error: err.message || 'Failed to refund room' });
+    console.error('Refund game error:', err);
+    res.status(500).json({ error: 'Failed to refund room' });
   }
 });
 
-router.post('/games/:id/force-start', adminMiddleware, async (req, res) => {
+router.post('/games/:id/force-start', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const roomId = req.params.id;
     const roomManager = require('./roomManager');
@@ -799,34 +986,46 @@ router.post('/games/:id/force-start', adminMiddleware, async (req, res) => {
     }
     
     roomManager.startRoomGame(roomId, true);
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: req.admin.email || null,
+      action: 'force_start_game',
+      targetType: 'game',
+      targetIds: [roomId],
+      snapshot: [{ roomId, filledSeats: room.seats.length, uniqueUsers }],
+      req
+    });
     
     res.json({ success: true, message: 'Game forced to start successfully' });
   } catch (err) {
-    res.status(500).json({ error: err.message || 'Failed to force start game' });
+    console.error('Force start game error:', err);
+    res.status(500).json({ error: 'Failed to force start game' });
   }
 });
 
 // Create new custom game room
-router.post('/games', adminMiddleware, async (req, res) => {
+router.post('/games', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
-    const { targetJackpot, groupSize, maxSeatsPerPlayer, roundDurationSeconds, customTicketPrice } = req.body;
-    let { tierCategory } = req.body;
+    const { targetJackpot, groupSize, maxSeatsPerPlayer, roundDurationSeconds, customTicketPrice } = req.body || {};
+    let { tierCategory } = req.body || {};
 
-    if (!targetJackpot || parseFloat(targetJackpot) <= 0) {
+    const jackpotNum = Number(targetJackpot);
+    const sizeNum = parseInt(groupSize, 10);
+
+    if (!Number.isFinite(jackpotNum) || jackpotNum <= 0 || jackpotNum > 10000000) {
       return res.status(400).json({ error: 'Valid target jackpot is required' });
     }
-    if (!groupSize || parseInt(groupSize) < 2) {
-      return res.status(400).json({ error: 'Group size must be at least 2 players' });
+    if (!Number.isInteger(sizeNum) || sizeNum < 2 || sizeNum > 500) {
+      return res.status(400).json({ error: 'Group size must be between 2 and 500 players' });
     }
-
-    const jackpotNum = parseFloat(targetJackpot);
-    const sizeNum = parseInt(groupSize);
 
     if (!tierCategory) {
       if (jackpotNum >= 100000) tierCategory = 'gold';
       else if (jackpotNum >= 10000) tierCategory = 'silver';
       else if (jackpotNum >= 1000)  tierCategory = 'bronze';
       else tierCategory = 'starter';
+    } else if (!ALLOWED_TIERS.has(String(tierCategory))) {
+      return res.status(400).json({ error: 'Invalid tier category' });
     }
 
     const roomManager = require('./roomManager');
@@ -834,20 +1033,20 @@ router.post('/games', adminMiddleware, async (req, res) => {
       tierCategory,
       jackpotNum,
       sizeNum,
-      maxSeatsPerPlayer ? parseInt(maxSeatsPerPlayer) : null,
-      roundDurationSeconds ? parseInt(roundDurationSeconds) : 60,
+      maxSeatsPerPlayer ? parseInt(maxSeatsPerPlayer, 10) : null,
+      roundDurationSeconds ? parseInt(roundDurationSeconds, 10) : 60,
       customTicketPrice ? parseFloat(customTicketPrice) : null
     );
 
     res.status(201).json({ success: true, game: room });
   } catch (err) {
     console.error('Create game error:', err);
-    res.status(400).json({ error: err.message || 'Failed to create game room' });
+    res.status(400).json({ error: 'Failed to create game room' });
   }
 });
 
 // Update open game room
-router.put('/games/:id', adminMiddleware, async (req, res) => {
+router.put('/games/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const roomId = req.params.id;
     const roomManager = require('./roomManager');
@@ -855,26 +1054,35 @@ router.put('/games/:id', adminMiddleware, async (req, res) => {
     res.json({ success: true, game: updated });
   } catch (err) {
     console.error('Update game error:', err);
-    res.status(400).json({ error: err.message || 'Failed to update game' });
+    res.status(400).json({ error: 'Failed to update game' });
   }
 });
 
 // Delete / Cancel game room (with auto-refund if seats were filled)
-router.delete('/games/:id', adminMiddleware, async (req, res) => {
+router.delete('/games/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const roomId = req.params.id;
     const roomManager = require('./roomManager');
     const result = await roomManager.deleteRoom(roomId);
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: req.admin.email || null,
+      action: 'delete_game',
+      targetType: 'game',
+      targetIds: [roomId],
+      snapshot: [result || { roomId }],
+      req
+    });
     res.json({ success: true, message: 'Game room deleted / refunded successfully', ...result });
   } catch (err) {
     console.error('Delete game error:', err);
-    res.status(400).json({ error: err.message || 'Failed to delete game' });
+    res.status(400).json({ error: 'Failed to delete game' });
   }
 });
 
 // ── Room/Seat Configuration ───────────────────────────────────────────────────
 
-router.get('/room-configs', adminMiddleware, async (req, res) => {
+router.get('/room-configs', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const quotas = await db.query(`SELECT * FROM seat_quotas ORDER BY tier_index`);
     const tiers = await db.query(`SELECT tier, COUNT(*) AS jackpot_options, MIN(jackpot_amount) AS min_jackpot, MAX(jackpot_amount) AS max_jackpot FROM tier_config GROUP BY tier ORDER BY tier`);
@@ -884,17 +1092,42 @@ router.get('/room-configs', adminMiddleware, async (req, res) => {
   }
 });
 
-router.put('/room-configs/quota/:groupSize', adminMiddleware, async (req, res) => {
+router.put('/room-configs/quota/:groupSize', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
-    const { groupSize } = req.params;
-    const { maxSeatsPerUser } = req.body;
-    await db.query(
-      `UPDATE seat_quotas SET max_seats_per_user = $1 WHERE group_size = $2`,
-      [maxSeatsPerUser, groupSize]
+    const groupSizeNum = parseInt(req.params.groupSize, 10);
+    const maxSeatsNum = parseInt(req.body?.maxSeatsPerUser, 10);
+    if (!Number.isInteger(groupSizeNum) || groupSizeNum < 2) {
+      return res.status(400).json({ error: 'Invalid group size' });
+    }
+    if (!Number.isInteger(maxSeatsNum) || maxSeatsNum < 1 || maxSeatsNum >= groupSizeNum) {
+      return res.status(400).json({ error: `maxSeatsPerUser must be between 1 and ${groupSizeNum - 1}` });
+    }
+
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, req.body?.confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
+    }
+
+    const upd = await db.query(
+      `UPDATE seat_quotas SET max_seats_per_user = $1 WHERE group_size = $2 RETURNING group_size, max_seats_per_user`,
+      [maxSeatsNum, groupSizeNum]
     );
+    if (upd.rowCount === 0) {
+      return res.status(404).json({ error: 'Room quota configuration not found' });
+    }
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      action: 'update_room_quota',
+      targetType: 'settings',
+      targetIds: [String(groupSizeNum)],
+      snapshot: upd.rows,
+      req
+    });
     res.json({ success: true });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('Update quota error:', err);
+    res.status(500).json({ error: 'Failed to update seat quota' });
   }
 });
 
@@ -910,11 +1143,9 @@ router.get('/transactions', adminMiddleware, adminReadLimiter, async (req, res) 
     if (status && !ALLOWED_TX_STATUSES.has(String(status))) {
       return res.status(400).json({ error: 'Invalid transaction status filter' });
     }
-    if (dateFrom && !ISO_DATE_RE.test(String(dateFrom))) {
-      return res.status(400).json({ error: 'Invalid dateFrom format (expected YYYY-MM-DD)' });
-    }
-    if (dateTo && !ISO_DATE_RE.test(String(dateTo))) {
-      return res.status(400).json({ error: 'Invalid dateTo format (expected YYYY-MM-DD)' });
+    const dr = validateDateRange(dateFrom, dateTo);
+    if (!dr.ok) {
+      return res.status(400).json({ error: dr.error });
     }
 
     const safePage = Math.max(1, parseInt(page, 10) || 1);
@@ -1067,7 +1298,7 @@ router.post('/transactions/bulk-delete', adminMiddleware, txMutationLimiter, asy
 
 // ── Profit / Revenue ──────────────────────────────────────────────────────────
 
-router.get('/profit/summary', adminMiddleware, async (req, res) => {
+router.get('/profit/summary', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const [treasury, deposits, withdrawals, balances] = await Promise.all([
       db.query(`SELECT COALESCE(SUM(tax_collected),0) AS platform_profit, COALESCE(SUM(gross_pool),0) AS total_wagered, COALESCE(SUM(net_paid_out),0) AS total_won FROM platform_treasury`),
@@ -1089,7 +1320,7 @@ router.get('/profit/summary', adminMiddleware, async (req, res) => {
   }
 });
 
-router.get('/profit/chart', adminMiddleware, async (req, res) => {
+router.get('/profit/chart', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const { period = '30d' } = req.query;
     const days = period === '7d' ? 7 : period === '90d' ? 90 : 30;
@@ -1112,7 +1343,7 @@ router.get('/profit/chart', adminMiddleware, async (req, res) => {
 
 // ── Prize / Platform Settings ─────────────────────────────────────────────────
 
-router.get('/prize-settings', adminMiddleware, async (req, res) => {
+router.get('/prize-settings', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const quotas = await db.query(`SELECT * FROM seat_quotas ORDER BY tier_index`);
     res.json({
@@ -1128,13 +1359,16 @@ router.get('/prize-settings', adminMiddleware, async (req, res) => {
 
 // ── Reports ───────────────────────────────────────────────────────────────────
 
-router.get('/reports/players', adminMiddleware, async (req, res) => {
+router.get('/reports/players', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const { dateFrom, dateTo } = req.query;
+    const dr = validateDateRange(dateFrom, dateTo);
+    if (!dr.ok) return res.status(400).json({ error: dr.error });
+
     let whereClause = `WHERE u.role = 'player'`;
     const params = [];
-    if (dateFrom) { params.push(dateFrom); whereClause += ` AND u.created_at >= $${params.length}`; }
-    if (dateTo)   { params.push(dateTo);   whereClause += ` AND u.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
+    if (dateFrom) { params.push(String(dateFrom)); whereClause += ` AND u.created_at >= $${params.length}::DATE`; }
+    if (dateTo)   { params.push(String(dateTo));   whereClause += ` AND u.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
 
     const result = await db.query(`
       SELECT
@@ -1152,6 +1386,7 @@ router.get('/reports/players', adminMiddleware, async (req, res) => {
       ${whereClause}
       GROUP BY u.id, w.balance, w.total_deposited, w.total_withdrawn, w.total_wagered, w.total_won
       ORDER BY u.created_at DESC
+      LIMIT 2000
     `, params);
 
     res.json(result.rows);
@@ -1160,15 +1395,24 @@ router.get('/reports/players', adminMiddleware, async (req, res) => {
   }
 });
 
-router.get('/reports/games', adminMiddleware, async (req, res) => {
+router.get('/reports/games', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const { dateFrom, dateTo, tier, status } = req.query;
+    const dr = validateDateRange(dateFrom, dateTo);
+    if (!dr.ok) return res.status(400).json({ error: dr.error });
+    if (tier && !ALLOWED_TIERS.has(String(tier))) {
+      return res.status(400).json({ error: 'Invalid tier filter' });
+    }
+    if (status && !ALLOWED_ROOM_STATUSES.has(String(status))) {
+      return res.status(400).json({ error: 'Invalid room status filter' });
+    }
+
     let whereClause = 'WHERE 1=1';
     const params = [];
-    if (dateFrom) { params.push(dateFrom); whereClause += ` AND r.started_at >= $${params.length}`; }
-    if (dateTo)   { params.push(dateTo);   whereClause += ` AND r.started_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
-    if (tier)     { params.push(tier);     whereClause += ` AND r.tier = $${params.length}`; }
-    if (status)   { params.push(status);   whereClause += ` AND r.status = $${params.length}`; }
+    if (dateFrom) { params.push(String(dateFrom)); whereClause += ` AND r.started_at >= $${params.length}::DATE`; }
+    if (dateTo)   { params.push(String(dateTo));   whereClause += ` AND r.started_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
+    if (tier)     { params.push(String(tier));     whereClause += ` AND r.tier = $${params.length}`; }
+    if (status)   { params.push(String(status));   whereClause += ` AND r.status = $${params.length}`; }
 
     const result = await db.query(`
       SELECT r.room_number, r.tier, r.target_jackpot, r.group_size, r.ticket_price, r.filled_seats,
@@ -1178,6 +1422,7 @@ router.get('/reports/games', adminMiddleware, async (req, res) => {
       LEFT JOIN users u ON u.id = r.winner_user_id
       ${whereClause}
       ORDER BY r.started_at DESC
+      LIMIT 2000
     `, params);
 
     res.json(result.rows);
@@ -1186,14 +1431,20 @@ router.get('/reports/games', adminMiddleware, async (req, res) => {
   }
 });
 
-router.get('/reports/transactions', adminMiddleware, async (req, res) => {
+router.get('/reports/transactions', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const { dateFrom, dateTo, type } = req.query;
+    const dr = validateDateRange(dateFrom, dateTo);
+    if (!dr.ok) return res.status(400).json({ error: dr.error });
+    if (type && !ALLOWED_TX_TYPES.has(String(type))) {
+      return res.status(400).json({ error: 'Invalid transaction type filter' });
+    }
+
     let whereClause = 'WHERE 1=1';
     const params = [];
-    if (dateFrom) { params.push(dateFrom); whereClause += ` AND t.created_at >= $${params.length}`; }
-    if (dateTo)   { params.push(dateTo);   whereClause += ` AND t.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
-    if (type)     { params.push(type);     whereClause += ` AND t.tx_type = $${params.length}`; }
+    if (dateFrom) { params.push(String(dateFrom)); whereClause += ` AND t.created_at >= $${params.length}::DATE`; }
+    if (dateTo)   { params.push(String(dateTo));   whereClause += ` AND t.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
+    if (type)     { params.push(String(type));     whereClause += ` AND t.tx_type = $${params.length}`; }
 
     const result = await db.query(`
       SELECT t.id, t.tx_type, t.amount, t.direction, t.running_balance, t.status, t.reference_note, t.created_at,
@@ -1203,6 +1454,7 @@ router.get('/reports/transactions', adminMiddleware, async (req, res) => {
       JOIN users u ON u.id = w.user_id
       ${whereClause}
       ORDER BY t.created_at DESC
+      LIMIT 2000
     `, params);
 
     res.json(result.rows);
@@ -1211,13 +1463,16 @@ router.get('/reports/transactions', adminMiddleware, async (req, res) => {
   }
 });
 
-router.get('/reports/profit', adminMiddleware, async (req, res) => {
+router.get('/reports/profit', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const { dateFrom, dateTo } = req.query;
+    const dr = validateDateRange(dateFrom, dateTo);
+    if (!dr.ok) return res.status(400).json({ error: dr.error });
+
     let whereClause = 'WHERE 1=1';
     const params = [];
-    if (dateFrom) { params.push(dateFrom); whereClause += ` AND pt.collected_at >= $${params.length}`; }
-    if (dateTo)   { params.push(dateTo);   whereClause += ` AND pt.collected_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
+    if (dateFrom) { params.push(String(dateFrom)); whereClause += ` AND pt.collected_at >= $${params.length}::DATE`; }
+    if (dateTo)   { params.push(String(dateTo));   whereClause += ` AND pt.collected_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
 
     const result = await db.query(`
       SELECT r.room_number, r.tier, pt.gross_pool, pt.tax_rate, pt.tax_collected AS profit,
@@ -1227,6 +1482,7 @@ router.get('/reports/profit', adminMiddleware, async (req, res) => {
       LEFT JOIN users u ON u.id = pt.winner_user_id
       ${whereClause}
       ORDER BY pt.collected_at DESC
+      LIMIT 2000
     `, params);
 
     res.json(result.rows);
@@ -1237,13 +1493,15 @@ router.get('/reports/profit', adminMiddleware, async (req, res) => {
 
 // ── Platform Settings ─────────────────────────────────────────────────────────
 
-router.get('/settings', adminMiddleware, async (req, res) => {
+router.get('/settings', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const quotas = await db.query(`SELECT * FROM seat_quotas ORDER BY tier_index`);
     const tiers = await db.query(`SELECT tier, COUNT(*) AS jackpot_options FROM tier_config GROUP BY tier ORDER BY tier`);
     const sysConfig = await db.query(`SELECT * FROM system_config`);
     const configMap = sysConfig.rows.reduce((acc, row) => ({ ...acc, [row.config_key]: row.config_value }), {});
     const platformFee = parseFloat(configMap.PLATFORM_FEE_RATE || '0.15');
+    const rawKey = configMap.VERIFY_ET_API_KEY || '';
+    const maskedKey = rawKey ? `${'•'.repeat(Math.min(12, Math.max(4, rawKey.length - 4)))}${rawKey.slice(-4)}` : '';
 
     res.json({
       quotas: quotas.rows,
@@ -1252,39 +1510,94 @@ router.get('/settings', adminMiddleware, async (req, res) => {
       prizePct: 1 - platformFee,
       telebirrPhone: configMap.TELEBIRR_PHONE || '',
       telebirrName: configMap.TELEBIRR_NAME || '',
-      verifyEtApiKey: configMap.VERIFY_ET_API_KEY || ''
+      hasVerifyEtApiKey: Boolean(rawKey),
+      verifyEtApiKeyMasked: maskedKey
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch settings' });
   }
 });
 
-router.put('/settings', adminMiddleware, async (req, res) => {
+router.get('/settings/audit-logs', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
-    const { telebirrPhone, telebirrName, verifyEtApiKey, platformFee } = req.body;
-    
+    const result = await db.query(
+      `SELECT id, admin_id, admin_username, action, target_type, target_ids,
+              snapshot, ip_address, created_at
+       FROM admin_audit_logs
+       WHERE target_type IN ('settings', 'admin', 'wallet', 'player', 'game')
+       ORDER BY created_at DESC
+       LIMIT 50`
+    );
+    res.json({ logs: result.rows });
+  } catch (err) {
+    console.error('Settings audit log error:', err);
+    res.status(500).json({ error: 'Failed to fetch security audit logs' });
+  }
+});
+
+router.put('/settings', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
+  try {
+    const { telebirrPhone, telebirrName, verifyEtApiKey, platformFee, confirmPassword } = req.body || {};
+
     if (platformFee !== undefined) {
-      await db.query('INSERT INTO system_config (config_key, config_value) VALUES ($1, $2) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value', ['PLATFORM_FEE_RATE', platformFee.toString()]);
+      const feeNum = Number(platformFee);
+      if (!Number.isFinite(feeNum) || feeNum < 0 || feeNum > 1) {
+        return res.status(400).json({ error: 'Platform fee must be between 0 and 1 (0% to 100%)' });
+      }
+    }
+    if (telebirrPhone !== undefined && String(telebirrPhone).trim().length > 30) {
+      return res.status(400).json({ error: 'Telebirr phone number too long (max 30 chars)' });
+    }
+    if (telebirrName !== undefined && String(telebirrName).trim().length > 100) {
+      return res.status(400).json({ error: 'Telebirr receiver name too long (max 100 chars)' });
+    }
+    if (verifyEtApiKey !== undefined && String(verifyEtApiKey).trim().length > 256) {
+      return res.status(400).json({ error: 'API key too long (max 256 chars)' });
+    }
+
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
+    }
+
+    const changedKeys = [];
+    if (platformFee !== undefined) {
+      await db.query('INSERT INTO system_config (config_key, config_value) VALUES ($1, $2) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value', ['PLATFORM_FEE_RATE', String(Number(platformFee))]);
+      changedKeys.push('PLATFORM_FEE_RATE');
     }
     if (telebirrPhone !== undefined) {
-      await db.query('INSERT INTO system_config (config_key, config_value) VALUES ($1, $2) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value', ['TELEBIRR_PHONE', telebirrPhone]);
+      await db.query('INSERT INTO system_config (config_key, config_value) VALUES ($1, $2) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value', ['TELEBIRR_PHONE', String(telebirrPhone).trim()]);
+      changedKeys.push('TELEBIRR_PHONE');
     }
     if (telebirrName !== undefined) {
-      await db.query('INSERT INTO system_config (config_key, config_value) VALUES ($1, $2) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value', ['TELEBIRR_NAME', telebirrName]);
+      await db.query('INSERT INTO system_config (config_key, config_value) VALUES ($1, $2) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value', ['TELEBIRR_NAME', String(telebirrName).trim()]);
+      changedKeys.push('TELEBIRR_NAME');
     }
-    if (verifyEtApiKey !== undefined) {
-      await db.query('INSERT INTO system_config (config_key, config_value) VALUES ($1, $2) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value', ['VERIFY_ET_API_KEY', verifyEtApiKey]);
+    if (typeof verifyEtApiKey === 'string' && verifyEtApiKey.trim().length > 0 && !verifyEtApiKey.trim().startsWith('•')) {
+      await db.query('INSERT INTO system_config (config_key, config_value) VALUES ($1, $2) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value', ['VERIFY_ET_API_KEY', verifyEtApiKey.trim()]);
+      changedKeys.push('VERIFY_ET_API_KEY_ROTATED');
     }
+
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      action: 'update_settings',
+      targetType: 'settings',
+      targetIds: changedKeys,
+      snapshot: [{ changedKeys, platformFee: platformFee !== undefined ? Number(platformFee) : undefined }],
+      req
+    });
 
     res.json({ success: true });
   } catch (err) {
+    console.error('Update settings error:', err);
     res.status(500).json({ error: 'Failed to update settings' });
   }
 });
 
 // ── Admin Users CRUD ──────────────────────────────────────────────────────────
 
-router.get('/admins', adminMiddleware, async (req, res) => {
+router.get('/admins', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const result = await db.query(`
       SELECT id, phone_number, display_name, role, is_active, created_at, last_login_at
@@ -1298,11 +1611,12 @@ router.get('/admins', adminMiddleware, async (req, res) => {
   }
 });
 
-router.post('/create-admin', adminMiddleware, async (req, res) => {
+router.post('/create-admin', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const phoneNumber = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
     const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const confirmPassword = req.body?.confirmPassword;
 
     if (!phoneNumber || !displayName || !password)
       return res.status(400).json({ error: 'Username/phone, display name, and password are required' });
@@ -1312,6 +1626,11 @@ router.post('/create-admin', adminMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Display name must be 50 characters or less' });
     if (password.trim().length < 6)
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
+    }
 
     const existing = await db.query(`SELECT id FROM users WHERE phone_number = $1`, [phoneNumber]);
     if (existing.rows.length > 0)
@@ -1323,13 +1642,24 @@ router.post('/create-admin', adminMiddleware, async (req, res) => {
       VALUES ($1, $2, $3, 'admin') RETURNING id, display_name, phone_number, role, is_active, created_at, last_login_at
     `, [phoneNumber, displayName, hash]);
 
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      action: 'create_admin',
+      targetType: 'admin',
+      targetIds: [result.rows[0].id],
+      snapshot: [{ id: result.rows[0].id, phone_number: phoneNumber, display_name: displayName }],
+      req
+    });
+
     res.json({ success: true, admin: result.rows[0] });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('Create admin error:', err);
+    res.status(500).json({ error: 'Failed to create administrator' });
   }
 });
 
-router.put('/admins/:id', adminMiddleware, async (req, res) => {
+router.put('/admins/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const targetId = req.params.id;
     const phoneNumber = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
@@ -1337,6 +1667,7 @@ router.put('/admins/:id', adminMiddleware, async (req, res) => {
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const hasIsActive = typeof req.body?.isActive === 'boolean';
     const isActive = req.body?.isActive;
+    const confirmPassword = req.body?.confirmPassword;
 
     const existingAdmin = await db.query(
       `SELECT id, phone_number, display_name, is_active FROM users WHERE id = $1 AND role = 'admin'`,
@@ -1357,6 +1688,11 @@ router.put('/admins/:id', adminMiddleware, async (req, res) => {
     }
     if (password.length > 0 && password.trim().length < 6) {
       return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+    }
+
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
     }
 
     const dupCheck = await db.query(
@@ -1402,6 +1738,16 @@ router.put('/admins/:id', adminMiddleware, async (req, res) => {
     );
 
     const updatedAdmin = updated.rows[0];
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      action: 'update_admin',
+      targetType: 'admin',
+      targetIds: [targetId],
+      snapshot: [{ id: targetId, phone_number: phoneNumber, display_name: displayName, is_active: updatedAdmin.is_active, passwordChanged: password.length > 0 }],
+      req
+    });
+
     const responsePayload = { success: true, admin: updatedAdmin };
     if (req.admin && req.admin.id === targetId) {
       responsePayload.token = generateToken({
@@ -1413,15 +1759,21 @@ router.put('/admins/:id', adminMiddleware, async (req, res) => {
 
     res.json(responsePayload);
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('Update admin error:', err);
+    res.status(500).json({ error: 'Failed to update administrator' });
   }
 });
 
-router.delete('/admins/:id', adminMiddleware, async (req, res) => {
+router.delete('/admins/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const targetId = req.params.id;
     if (req.admin && req.admin.id === targetId) {
       return res.status(400).json({ error: 'You cannot delete your own admin account.' });
+    }
+
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, req.body?.confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
     }
 
     const countRes = await db.query(`SELECT COUNT(*) AS cnt FROM users WHERE role = 'admin'`);
@@ -1429,14 +1781,25 @@ router.delete('/admins/:id', adminMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Cannot delete the last remaining administrator account.' });
     }
 
-    const delRes = await db.query(`DELETE FROM users WHERE id = $1 AND role = 'admin' RETURNING id, display_name`, [targetId]);
+    const delRes = await db.query(`DELETE FROM users WHERE id = $1 AND role = 'admin' RETURNING id, display_name, phone_number`, [targetId]);
     if (delRes.rowCount === 0) {
       return res.status(404).json({ error: 'Admin user not found.' });
     }
 
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      action: 'delete_admin',
+      targetType: 'admin',
+      targetIds: [targetId],
+      snapshot: delRes.rows,
+      req
+    });
+
     res.json({ success: true, message: `Admin ${delRes.rows[0].display_name} deleted successfully.` });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to delete admin: ' + err.message });
+    console.error('Delete admin error:', err);
+    res.status(500).json({ error: 'Failed to delete admin account' });
   }
 });
 
