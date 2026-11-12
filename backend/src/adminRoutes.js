@@ -224,8 +224,20 @@ router.get('/dashboard/revenue-chart', adminMiddleware, async (req, res) => {
 
 router.get('/players', adminMiddleware, async (req, res) => {
   try {
-    const { search, status, page = 1, limit = 20 } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const {
+      search,
+      status,
+      balanceFilter,
+      minBalance,
+      maxBalance,
+      sortBy,
+      page = 1,
+      limit = 20
+    } = req.query;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const offset = (pageNum - 1) * limitNum;
+
     let whereClause = `WHERE u.role = 'player'`;
     const params = [];
 
@@ -239,12 +251,47 @@ router.get('/players', adminMiddleware, async (req, res) => {
       whereClause += ` AND u.is_active = FALSE`;
     }
 
+    if (balanceFilter === 'zero') {
+      whereClause += ` AND COALESCE(w.balance, 0) = 0`;
+    } else if (balanceFilter === 'positive') {
+      whereClause += ` AND COALESCE(w.balance, 0) > 0`;
+    } else if (balanceFilter === 'high') {
+      whereClause += ` AND COALESCE(w.balance, 0) >= 1000`;
+    }
+
+    if (minBalance !== undefined && minBalance !== '') {
+      const minVal = Number(minBalance);
+      if (!Number.isFinite(minVal) || minVal < 0) {
+        return res.status(400).json({ error: 'Invalid minimum balance filter' });
+      }
+      params.push(minVal);
+      whereClause += ` AND COALESCE(w.balance, 0) >= $${params.length}`;
+    }
+
+    if (maxBalance !== undefined && maxBalance !== '') {
+      const maxVal = Number(maxBalance);
+      if (!Number.isFinite(maxVal) || maxVal < 0) {
+        return res.status(400).json({ error: 'Invalid maximum balance filter' });
+      }
+      params.push(maxVal);
+      whereClause += ` AND COALESCE(w.balance, 0) <= $${params.length}`;
+    }
+
+    const orderByMap = {
+      balance_desc: 'COALESCE(w.balance, 0) DESC, u.created_at DESC',
+      balance_asc: 'COALESCE(w.balance, 0) ASC, u.created_at DESC',
+      newest: 'u.created_at DESC'
+    };
+    const orderByClause = orderByMap[sortBy] || orderByMap.newest;
+
     const countResult = await db.query(
-      `SELECT COUNT(*) FROM users u ${whereClause}`,
+      `SELECT COUNT(*) FROM users u
+       LEFT JOIN wallets w ON w.user_id = u.id AND w.mode = 'real'
+       ${whereClause}`,
       params
     );
 
-    const dataParams = [...params, parseInt(limit), offset];
+    const dataParams = [...params, limitNum, offset];
     const result = await db.query(`
       SELECT
         u.id, u.display_name, u.phone_number, u.telegram_id, u.is_active, u.role,
@@ -261,15 +308,15 @@ router.get('/players', adminMiddleware, async (req, res) => {
       LEFT JOIN tickets t ON t.user_id = u.id
       ${whereClause}
       GROUP BY u.id, u.telegram_id, w.balance, w.total_deposited, w.total_withdrawn, w.total_wagered, w.total_won
-      ORDER BY u.created_at DESC
+      ORDER BY ${orderByClause}
       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}
     `, dataParams);
 
     res.json({
       players: result.rows,
-      total: parseInt(countResult.rows[0].count),
-      page: parseInt(page),
-      limit: parseInt(limit)
+      total: parseInt(countResult.rows[0].count, 10),
+      page: pageNum,
+      limit: limitNum
     });
   } catch (err) {
     console.error('Players list error:', err);

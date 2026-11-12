@@ -4,9 +4,18 @@ import api from "../api";
 import { Search, Eye, ShieldAlert, ShieldCheck, Edit, Trash2, UserPlus, X } from "lucide-react";
 
 export default function Players() {
+  const initialFilters = {
+    search: "",
+    status: "",
+    balanceFilter: "",
+    minBalance: "",
+    maxBalance: "",
+    sortBy: "",
+    page: 1
+  };
   const [data, setData] = useState({ players: [], total: 0 });
   const [loading, setLoading] = useState(true);
-  const [filters, setFilters] = useState({ search: "", status: "", page: 1 });
+  const [filters, setFilters] = useState(initialFilters);
 
   // Modal State
   const [modalOpen, setModalOpen] = useState(false);
@@ -18,20 +27,34 @@ export default function Players() {
   // Bulk Selection State
   const [selectedPlayers, setSelectedPlayers] = useState([]);
 
-  const fetchPlayers = () => {
+  const fetchPlayers = (activeFilters = filters) => {
     setLoading(true);
-    api.getPlayers(filters)
+    const cleanParams = Object.fromEntries(
+      Object.entries(activeFilters).filter(([, v]) => v !== "" && v !== null && v !== undefined)
+    );
+    api.getPlayers(cleanParams)
       .then(res => setData(res || { players: [], total: 0 }))
       .catch(err => console.error("Failed to load players:", err))
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { fetchPlayers(); }, [filters.page, filters.status]);
+  useEffect(() => {
+    fetchPlayers(filters);
+  }, [filters.page, filters.status, filters.balanceFilter, filters.sortBy]);
 
   const handleSearch = (e) => {
     e.preventDefault();
     if (filters.page !== 1) setFilters({ ...filters, page: 1 });
-    else fetchPlayers();
+    else fetchPlayers(filters);
+  };
+
+  const hasActiveFilters = Boolean(
+    filters.search || filters.status || filters.balanceFilter || filters.minBalance || filters.maxBalance || filters.sortBy
+  );
+
+  const handleResetFilters = () => {
+    setFilters(initialFilters);
+    fetchPlayers(initialFilters);
   };
 
   const toggleStatus = async (player) => {
@@ -128,8 +151,8 @@ export default function Players() {
           </div>
         </div>
         <div className="card-body">
-          <form onSubmit={handleSearch} className="filter-row" style={{ display: "flex", gap: 12, marginBottom: 24 }}>
-            <div className="search-input-wrapper" style={{ flex: 1, position: "relative" }}>
+          <form onSubmit={handleSearch} className="filter-row" style={{ display: "flex", gap: 10, marginBottom: 24, flexWrap: "wrap", alignItems: "center" }}>
+            <div className="search-input-wrapper" style={{ flex: "1 1 220px", position: "relative" }}>
               <Search size={16} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
               <input
                 type="text"
@@ -145,12 +168,61 @@ export default function Players() {
               style={{ width: "auto" }}
               value={filters.status}
               onChange={e => setFilters({ ...filters, status: e.target.value, page: 1 })}
+              aria-label="Filter by status"
             >
               <option value="">All Statuses</option>
               <option value="active">Active</option>
               <option value="inactive">Blocked</option>
             </select>
+            <select
+              className="form-select"
+              style={{ width: "auto" }}
+              value={filters.balanceFilter}
+              onChange={e => setFilters({ ...filters, balanceFilter: e.target.value, page: 1 })}
+              aria-label="Filter by balance preset"
+            >
+              <option value="">All Balances</option>
+              <option value="zero">0 ETB (Empty)</option>
+              <option value="positive">&gt; 0 ETB (Has Balance)</option>
+              <option value="high">1,000+ ETB</option>
+            </select>
+            <input
+              type="number"
+              min="0"
+              step="any"
+              className="form-input"
+              style={{ width: 115 }}
+              placeholder="Min ETB"
+              value={filters.minBalance}
+              onChange={e => setFilters({ ...filters, minBalance: e.target.value })}
+              aria-label="Minimum balance ETB"
+            />
+            <input
+              type="number"
+              min="0"
+              step="any"
+              className="form-input"
+              style={{ width: 115 }}
+              placeholder="Max ETB"
+              value={filters.maxBalance}
+              onChange={e => setFilters({ ...filters, maxBalance: e.target.value })}
+              aria-label="Maximum balance ETB"
+            />
+            <select
+              className="form-select"
+              style={{ width: "auto" }}
+              value={filters.sortBy}
+              onChange={e => setFilters({ ...filters, sortBy: e.target.value, page: 1 })}
+              aria-label="Sort players"
+            >
+              <option value="">Newest First</option>
+              <option value="balance_desc">Balance: High to Low</option>
+              <option value="balance_asc">Balance: Low to High</option>
+            </select>
             <button type="submit" className="btn btn-primary">Filter</button>
+            {hasActiveFilters && (
+              <button type="button" className="btn btn-ghost" onClick={handleResetFilters}>Clear</button>
+            )}
           </form>
 
           {loading ? (
