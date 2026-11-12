@@ -35,8 +35,15 @@ export function AuthProvider({ children }) {
     setAdmin(null);
   };
 
+  const refreshAdmin = async () => {
+    const data = await api.getMe();
+    localStorage.setItem('admin_user', JSON.stringify(data));
+    setAdmin(data);
+    return data;
+  };
+
   return (
-    <AuthContext.Provider value={{ admin, loading, login, logout }}>
+    <AuthContext.Provider value={{ admin, loading, login, logout, refreshAdmin }}>
       {children}
     </AuthContext.Provider>
   );

@@ -990,21 +990,118 @@ router.get('/admins', adminMiddleware, async (req, res) => {
 
 router.post('/create-admin', adminMiddleware, async (req, res) => {
   try {
-    const { phoneNumber, displayName, password } = req.body;
+    const phoneNumber = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
+    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+
     if (!phoneNumber || !displayName || !password)
-      return res.status(400).json({ error: 'All fields required' });
+      return res.status(400).json({ error: 'Username/phone, display name, and password are required' });
+    if (phoneNumber.length > 20)
+      return res.status(400).json({ error: 'Username / phone number must be 20 characters or less' });
+    if (displayName.length > 50)
+      return res.status(400).json({ error: 'Display name must be 50 characters or less' });
+    if (password.trim().length < 6)
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
     const existing = await db.query(`SELECT id FROM users WHERE phone_number = $1`, [phoneNumber]);
     if (existing.rows.length > 0)
-      return res.status(400).json({ error: 'Phone number already registered' });
+      return res.status(400).json({ error: 'Username or phone number is already registered' });
 
     const hash = await hashPassword(password);
     const result = await db.query(`
       INSERT INTO users (phone_number, display_name, password_hash, role)
-      VALUES ($1, $2, $3, 'admin') RETURNING id, display_name, phone_number, created_at
+      VALUES ($1, $2, $3, 'admin') RETURNING id, display_name, phone_number, role, is_active, created_at, last_login_at
     `, [phoneNumber, displayName, hash]);
 
     res.json({ success: true, admin: result.rows[0] });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.put('/admins/:id', adminMiddleware, async (req, res) => {
+  try {
+    const targetId = req.params.id;
+    const phoneNumber = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
+    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const hasIsActive = typeof req.body?.isActive === 'boolean';
+    const isActive = req.body?.isActive;
+
+    const existingAdmin = await db.query(
+      `SELECT id, phone_number, display_name, is_active FROM users WHERE id = $1 AND role = 'admin'`,
+      [targetId]
+    );
+    if (existingAdmin.rows.length === 0) {
+      return res.status(404).json({ error: 'Administrator account not found.' });
+    }
+
+    if (!phoneNumber || !displayName) {
+      return res.status(400).json({ error: 'Username / phone number and display name are required.' });
+    }
+    if (phoneNumber.length > 20) {
+      return res.status(400).json({ error: 'Username / phone number must be 20 characters or less.' });
+    }
+    if (displayName.length > 50) {
+      return res.status(400).json({ error: 'Display name must be 50 characters or less.' });
+    }
+    if (password.length > 0 && password.trim().length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+    }
+
+    const dupCheck = await db.query(
+      `SELECT id FROM users WHERE phone_number = $1 AND id <> $2`,
+      [phoneNumber, targetId]
+    );
+    if (dupCheck.rows.length > 0) {
+      return res.status(400).json({ error: 'Username or phone number is already in use by another account.' });
+    }
+
+    if (hasIsActive && isActive === false) {
+      if (req.admin && req.admin.id === targetId) {
+        return res.status(400).json({ error: 'You cannot deactivate your own admin account.' });
+      }
+      const activeOthers = await db.query(
+        `SELECT COUNT(*) AS cnt FROM users WHERE role = 'admin' AND is_active = TRUE AND id <> $1`,
+        [targetId]
+      );
+      if (parseInt(activeOthers.rows[0].cnt, 10) < 1) {
+        return res.status(400).json({ error: 'Cannot deactivate the last remaining active administrator.' });
+      }
+    }
+
+    const setClauses = ['phone_number = $1', 'display_name = $2', 'updated_at = NOW()'];
+    const values = [phoneNumber, displayName];
+
+    if (password.length > 0) {
+      const hash = await hashPassword(password);
+      values.push(hash);
+      setClauses.push(`password_hash = $${values.length}`);
+    }
+    if (hasIsActive) {
+      values.push(isActive);
+      setClauses.push(`is_active = $${values.length}`);
+    }
+
+    values.push(targetId);
+    const updated = await db.query(
+      `UPDATE users SET ${setClauses.join(', ')}
+       WHERE id = $${values.length} AND role = 'admin'
+       RETURNING id, phone_number, display_name, role, is_active, created_at, last_login_at`,
+      values
+    );
+
+    const updatedAdmin = updated.rows[0];
+    const responsePayload = { success: true, admin: updatedAdmin };
+    if (req.admin && req.admin.id === targetId) {
+      responsePayload.token = generateToken({
+        id: updatedAdmin.id,
+        role: updatedAdmin.role,
+        email: updatedAdmin.phone_number
+      });
+    }
+
+    res.json(responsePayload);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

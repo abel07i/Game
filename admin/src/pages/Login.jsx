@@ -44,14 +44,14 @@ export default function Login() {
 
         <form onSubmit={handleSubmit}>
           <div className="form-group">
-            <label className="form-label">Phone Number</label>
+            <label className="form-label">Username / Phone Number</label>
             <div style={{ position: "relative" }}>
               <Phone size={16} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
               <input
                 className="form-input"
                 style={{ paddingLeft: 38 }}
-                type="tel"
-                placeholder="+251..."
+                type="text"
+                placeholder="+251... or admin username"
                 value={phoneNumber}
                 onChange={e => setPhoneNumber(e.target.value)}
                 required

@@ -1,8 +1,10 @@
 import { useState, useEffect } from "react";
 import api from "../api";
-import { AlertCircle, CheckCircle, UserPlus, Info, Users, Trash2, X, Edit2, Shield } from "lucide-react";
+import { useAuth } from "../contexts/AuthContext";
+import { AlertCircle, CheckCircle, UserPlus, Info, Users, Trash2, X, Edit2, Shield, Eye, EyeOff } from "lucide-react";
 
 export default function Settings() {
+  const { refreshAdmin } = useAuth();
   const [data, setData] = useState({ configs: [], settings: null, admins: [] });
   const [currentAdmin, setCurrentAdmin] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -11,7 +13,21 @@ export default function Settings() {
   
   // Admin creation state
   const [newAdmin, setNewAdmin] = useState({ phoneNumber: "", displayName: "", password: "" });
+  const [showNewAdminPw, setShowNewAdminPw] = useState(false);
   const [creatingAdmin, setCreatingAdmin] = useState(false);
+
+  // Admin edit modal state
+  const [editAdminModal, setEditAdminModal] = useState({
+    open: false,
+    id: null,
+    phoneNumber: "",
+    displayName: "",
+    password: "",
+    isActive: true,
+    showPw: false,
+    submitting: false,
+    error: ""
+  });
 
   // Platform fee state
   const [platformFeeInput, setPlatformFeeInput] = useState("");
@@ -93,6 +109,7 @@ export default function Settings() {
       await api.createAdmin(newAdmin);
       setMessage(`Admin account for ${newAdmin.displayName} created successfully!`);
       setNewAdmin({ phoneNumber: "", displayName: "", password: "" });
+      setShowNewAdminPw(false);
       fetchSettings();
       setTimeout(() => setMessage(""), 5000);
     } catch (err) {
@@ -100,6 +117,74 @@ export default function Settings() {
       setTimeout(() => setError(""), 5000);
     } finally {
       setCreatingAdmin(false);
+    }
+  };
+
+  const openEditAdminModal = (adm) => {
+    setEditAdminModal({
+      open: true,
+      id: adm.id,
+      phoneNumber: adm.phone_number || "",
+      displayName: adm.display_name || "",
+      password: "",
+      isActive: adm.is_active !== false,
+      showPw: false,
+      submitting: false,
+      error: ""
+    });
+  };
+
+  const handleUpdateAdmin = async (e) => {
+    e.preventDefault();
+    const phoneNumber = editAdminModal.phoneNumber.trim();
+    const displayName = editAdminModal.displayName.trim();
+    const password = editAdminModal.password;
+
+    if (!phoneNumber || !displayName) {
+      setEditAdminModal(prev => ({ ...prev, error: "Username / phone number and display name are required." }));
+      return;
+    }
+    if (password.length > 0 && password.trim().length < 6) {
+      setEditAdminModal(prev => ({ ...prev, error: "New password must be at least 6 characters." }));
+      return;
+    }
+
+    setEditAdminModal(prev => ({ ...prev, submitting: true, error: "" }));
+    try {
+      const payload = {
+        phoneNumber,
+        displayName,
+        isActive: editAdminModal.isActive
+      };
+      if (password.length > 0) payload.password = password;
+
+      const res = await api.updateAdmin(editAdminModal.id, payload);
+      if (res?.token) {
+        localStorage.setItem("admin_token", res.token);
+      }
+      if (currentAdmin && currentAdmin.id === editAdminModal.id && refreshAdmin) {
+        await refreshAdmin().catch(() => {});
+      }
+      setEditAdminModal({
+        open: false,
+        id: null,
+        phoneNumber: "",
+        displayName: "",
+        password: "",
+        isActive: true,
+        showPw: false,
+        submitting: false,
+        error: ""
+      });
+      setMessage(`Administrator ${displayName} updated successfully!`);
+      fetchSettings();
+      setTimeout(() => setMessage(""), 5000);
+    } catch (err) {
+      setEditAdminModal(prev => ({
+        ...prev,
+        submitting: false,
+        error: err.message || "Failed to update administrator"
+      }));
     }
   };
 
@@ -253,16 +338,17 @@ export default function Settings() {
             <table>
               <thead>
                 <tr>
-                  <th>Admin Name</th>
-                  <th>Phone Number</th>
-                  <th>Role</th>
+                  <th>Display Name</th>
+                  <th>Username / Phone</th>
+                  <th>Status</th>
                   <th>Created</th>
-                  <th>Action</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {data.admins.map(adm => {
                   const isCurrent = currentAdmin && currentAdmin.id === adm.id;
+                  const isActive = adm.is_active !== false;
                   return (
                     <tr key={adm.id}>
                       <td style={{ fontWeight: 600 }}>
@@ -276,21 +362,37 @@ export default function Settings() {
                       </td>
                       <td className="font-mono text-sm">{adm.phone_number}</td>
                       <td>
-                        <span className="badge badge-primary">{adm.role}</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <span className="badge badge-primary">{adm.role}</span>
+                          <span className={`badge ${isActive ? 'badge-success' : 'badge-danger'}`} style={{ fontSize: 10 }}>
+                            {isActive ? 'Active' : 'Inactive'}
+                          </span>
+                        </div>
                       </td>
                       <td className="text-sm text-muted">
                         {adm.created_at ? new Date(adm.created_at).toLocaleDateString() : '—'}
                       </td>
                       <td>
-                        <button
-                          className="btn btn-danger btn-sm"
-                          disabled={isCurrent || data.admins.length <= 1}
-                          title={isCurrent ? "Cannot delete yourself" : (data.admins.length <= 1 ? "Cannot delete last admin" : "Delete administrator")}
-                          onClick={() => handleDeleteAdmin(adm)}
-                          style={{ padding: "4px 8px", opacity: (isCurrent || data.admins.length <= 1) ? 0.4 : 1 }}
-                        >
-                          <Trash2 size={13} /> Delete
-                        </button>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => openEditAdminModal(adm)}
+                            style={{ padding: "4px 8px", display: "inline-flex", alignItems: "center", gap: 4 }}
+                          >
+                            <Edit2 size={13} /> Edit
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-danger btn-sm"
+                            disabled={isCurrent || data.admins.length <= 1}
+                            title={isCurrent ? "Cannot delete yourself" : (data.admins.length <= 1 ? "Cannot delete last admin" : "Delete administrator")}
+                            onClick={() => handleDeleteAdmin(adm)}
+                            style={{ padding: "4px 8px", opacity: (isCurrent || data.admins.length <= 1) ? 0.4 : 1 }}
+                          >
+                            <Trash2 size={13} /> Delete
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -306,16 +408,35 @@ export default function Settings() {
             </h4>
             <form onSubmit={handleCreateAdmin} style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
               <div style={{ flex: '1 1 180px' }}>
-                <label style={{ fontSize: 13, marginBottom: 4, display: "block", color: "var(--text-secondary)" }}>Phone Number</label>
-                <input type="tel" className="form-input" required placeholder="+251..." value={newAdmin.phoneNumber} onChange={e => setNewAdmin({...newAdmin, phoneNumber: e.target.value})} />
+                <label style={{ fontSize: 13, marginBottom: 4, display: "block", color: "var(--text-secondary)" }}>Username / Phone Number</label>
+                <input type="text" maxLength={20} className="form-input" required placeholder="+251... or username" value={newAdmin.phoneNumber} onChange={e => setNewAdmin({...newAdmin, phoneNumber: e.target.value})} />
               </div>
               <div style={{ flex: '1 1 180px' }}>
                 <label style={{ fontSize: 13, marginBottom: 4, display: "block", color: "var(--text-secondary)" }}>Display Name</label>
-                <input type="text" className="form-input" required placeholder="Admin Name" value={newAdmin.displayName} onChange={e => setNewAdmin({...newAdmin, displayName: e.target.value})} />
+                <input type="text" maxLength={50} className="form-input" required placeholder="Admin Name" value={newAdmin.displayName} onChange={e => setNewAdmin({...newAdmin, displayName: e.target.value})} />
               </div>
               <div style={{ flex: '1 1 180px' }}>
                 <label style={{ fontSize: 13, marginBottom: 4, display: "block", color: "var(--text-secondary)" }}>Password</label>
-                <input type="password" className="form-input" required placeholder="••••••••" value={newAdmin.password} onChange={e => setNewAdmin({...newAdmin, password: e.target.value})} />
+                <div style={{ position: "relative" }}>
+                  <input
+                    type={showNewAdminPw ? "text" : "password"}
+                    minLength={6}
+                    className="form-input"
+                    style={{ paddingRight: 36 }}
+                    required
+                    placeholder="Min 6 characters"
+                    value={newAdmin.password}
+                    onChange={e => setNewAdmin({...newAdmin, password: e.target.value})}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewAdminPw(!showNewAdminPw)}
+                    title={showNewAdminPw ? "Hide password" : "Show password"}
+                    style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: 0 }}
+                  >
+                    {showNewAdminPw ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
               </div>
               <button type="submit" className="btn btn-primary" disabled={creatingAdmin} style={{ padding: "11px 20px" }}>
                  {creatingAdmin ? "Creating..." : "Create Admin"}
@@ -412,6 +533,117 @@ export default function Settings() {
                   disabled={quotaModal.submitting}
                 >
                   {quotaModal.submitting ? "Saving..." : "Save Quota"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Administrator Modal */}
+      {editAdminModal.open && (
+        <div className="modal-overlay" style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)",
+          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999, padding: 16
+        }}>
+          <div className="card" style={{ maxWidth: 460, width: "100%", border: "1px solid var(--border)", boxShadow: "0 20px 40px rgba(0,0,0,0.6)" }}>
+            <div className="card-header flex-between">
+              <div className="card-title">Edit Administrator Account</div>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setEditAdminModal(prev => ({ ...prev, open: false }))}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <form onSubmit={handleUpdateAdmin}>
+              <div className="card-body">
+                {editAdminModal.error && (
+                  <div style={{ marginBottom: 16, padding: 12, borderRadius: 6, background: "var(--danger-light)", border: "1px solid var(--danger)", color: "var(--danger)", fontSize: 13 }}>
+                    {editAdminModal.error}
+                  </div>
+                )}
+
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ display: "block", fontSize: 13, marginBottom: 6, color: "var(--text-secondary)" }}>
+                    Username / Phone Number
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={20}
+                    className="form-input"
+                    required
+                    placeholder="+251... or admin username"
+                    value={editAdminModal.phoneNumber}
+                    onChange={e => setEditAdminModal(prev => ({ ...prev, phoneNumber: e.target.value }))}
+                  />
+                </div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ display: "block", fontSize: 13, marginBottom: 6, color: "var(--text-secondary)" }}>
+                    Display Name
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={50}
+                    className="form-input"
+                    required
+                    placeholder="Administrator name"
+                    value={editAdminModal.displayName}
+                    onChange={e => setEditAdminModal(prev => ({ ...prev, displayName: e.target.value }))}
+                  />
+                </div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ display: "block", fontSize: 13, marginBottom: 6, color: "var(--text-secondary)" }}>
+                    New Password <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(leave blank to keep current)</span>
+                  </label>
+                  <div style={{ position: "relative" }}>
+                    <input
+                      type={editAdminModal.showPw ? "text" : "password"}
+                      minLength={6}
+                      className="form-input"
+                      style={{ paddingRight: 36 }}
+                      placeholder="Enter new password (min 6 chars)"
+                      value={editAdminModal.password}
+                      onChange={e => setEditAdminModal(prev => ({ ...prev, password: e.target.value }))}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setEditAdminModal(prev => ({ ...prev, showPw: !prev.showPw }))}
+                      title={editAdminModal.showPw ? "Hide password" : "Show password"}
+                      style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: 0 }}
+                    >
+                      {editAdminModal.showPw ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
+                </div>
+
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text-secondary)", cursor: (currentAdmin && currentAdmin.id === editAdminModal.id) ? "not-allowed" : "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={editAdminModal.isActive}
+                    disabled={Boolean(currentAdmin && currentAdmin.id === editAdminModal.id)}
+                    onChange={e => setEditAdminModal(prev => ({ ...prev, isActive: e.target.checked }))}
+                  />
+                  <span>Account Active {currentAdmin && currentAdmin.id === editAdminModal.id ? "(cannot deactivate current session)" : ""}</span>
+                </label>
+              </div>
+              <div className="card-footer flex justify-end gap-3" style={{ padding: "16px 24px", borderTop: "1px solid var(--border)" }}>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => setEditAdminModal(prev => ({ ...prev, open: false }))}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary btn-sm"
+                  disabled={editAdminModal.submitting}
+                >
+                  {editAdminModal.submitting ? "Saving..." : "Save Changes"}
                 </button>
               </div>
             </form>

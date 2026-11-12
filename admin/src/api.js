@@ -115,6 +115,7 @@ const api = {
   updateSettings: (data) => request('PUT', '/settings', data),
   getAdmins: () => request('GET', '/admins'),
   createAdmin: (data) => request('POST', '/create-admin', data),
+  updateAdmin: (id, data) => request('PUT', `/admins/${id}`, data),
   deleteAdmin: (id) => request('DELETE', `/admins/${id}`),
 };
 
