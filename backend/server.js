@@ -11,7 +11,7 @@ const walletLedger = require('./src/walletLedger');
 const roomManager = require('./src/roomManager');
 const adminRoutes = require('./src/adminRoutes');
 const { generateToken, verifyToken, hashPassword, verifyPassword } = require('./src/adminAuth');
-const { isValidUuid, createRateLimiter, securityHeaders, urlIntegrityGuard, verifyTelebirrReceiver } = require('./src/security');
+const { isValidUuid, createRateLimiter, securityHeaders, urlIntegrityGuard, openRedirectGuard, sanitizeText, sanitizePhone, sanitizeDisplayName, verifyTelebirrReceiver } = require('./src/security');
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
@@ -35,6 +35,7 @@ app.use(securityHeaders);
 app.use(urlIntegrityGuard);
 app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: '100kb' }));
+app.use(openRedirectGuard);
 
 // Rate limiters for auth & financial routes
 const loginLimiter = createRateLimiter({
@@ -319,18 +320,19 @@ app.post('/api/v1/auth/register', registerLimiter, async (req, res) => {
   const client = await db.getClient();
   let inTx = false;
   try {
-    const phoneNumber = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
-    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+    const rawPhone = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
+    const rawName  = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const telegramId = typeof req.body?.telegramId === 'string' && req.body.telegramId.trim() ? req.body.telegramId.trim() : null;
     const rawInviteCode = typeof req.body?.inviteCode === 'string' ? req.body.inviteCode.trim() : '';
 
-    if (!phoneNumber || !displayName || !password)
+    const phoneNumber = sanitizePhone(rawPhone);
+    if (!phoneNumber) return res.status(400).json({ error: 'Please enter a valid phone number' });
+    const displayName = sanitizeDisplayName(rawName, 50);
+    if (!displayName) return res.status(400).json({ error: 'Display name must be between 2 and 50 characters' });
+
+    if (!password)
       return res.status(400).json({ error: 'All fields are required' });
-    if (phoneNumber.length < 9 || phoneNumber.length > 20)
-      return res.status(400).json({ error: 'Please enter a valid phone number' });
-    if (displayName.length < 2 || displayName.length > 50)
-      return res.status(400).json({ error: 'Display name must be between 2 and 50 characters' });
     if (password.length < 6 || password.length > 128)
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
@@ -455,12 +457,13 @@ app.put('/api/v1/auth/profile', playerMiddleware, async (req, res) => {
   try {
     const userId = req.playerId; // from verified token
     const { displayName, password } = req.body;
-    const cleanName = typeof displayName === 'string' ? displayName.trim() : '';
-    if (!cleanName && !password) {
+    const hasNameInput = typeof displayName === 'string' && displayName.trim().length > 0;
+    const cleanName = hasNameInput ? sanitizeDisplayName(displayName, 50) : '';
+    if (!hasNameInput && !password) {
       return res.status(400).json({ error: 'Display name or password is required' });
     }
-    if (cleanName && (cleanName.length < 2 || cleanName.length > 50)) {
-      return res.status(400).json({ error: 'Display name must be between 2 and 50 characters' });
+    if (hasNameInput && !cleanName) {
+      return res.status(400).json({ error: 'Display name must be between 2 and 50 valid characters' });
     }
     if (password && (typeof password !== 'string' || password.length < 6 || password.length > 128)) {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
@@ -934,8 +937,14 @@ app.post('/api/v1/wallet/withdraw', playerMiddleware, walletLimiter, async (req,
   const client = await db.getClient();
   try {
     const userId = req.playerId;
-    const { amount, phoneNumber, paymentMethod = 'telebirr', accountHolderName } = req.body;
+    const { amount, phoneNumber: rawPayPhone, paymentMethod: rawPayMethod = 'telebirr', accountHolderName: rawHolderName } = req.body;
     const mode = 'real'; // Withdrawals strictly in real money mode
+
+    // Validate payment method (allowlist only)
+    const ALLOWED_PAYMENT_METHODS = new Set(['telebirr', 'cbe']);
+    const paymentMethod = typeof rawPayMethod === 'string' && ALLOWED_PAYMENT_METHODS.has(rawPayMethod.trim().toLowerCase())
+      ? rawPayMethod.trim().toLowerCase()
+      : 'telebirr';
 
     const rawAmount = Number(amount);
     const withdrawAmount = Math.round(rawAmount * 100) / 100;
@@ -966,10 +975,14 @@ app.post('/api/v1/wallet/withdraw', playerMiddleware, walletLimiter, async (req,
     const userRes = await client.query(`SELECT phone_number, display_name FROM users WHERE id = $1`, [userId]);
     if (userRes.rows.length === 0) return res.status(404).json({ error: 'User not found.' });
 
-    const phone = (typeof phoneNumber === 'string' && phoneNumber.trim()) ? phoneNumber.trim() : (userRes.rows[0].phone_number || '').trim();
-    if (!phone || phone.length < 9 || phone.length > 20) {
+    const phone = sanitizePhone(
+      (typeof rawPayPhone === 'string' && rawPayPhone.trim()) ? rawPayPhone.trim() : (userRes.rows[0].phone_number || '').trim()
+    );
+    if (!phone) {
       return res.status(400).json({ error: 'A valid Telebirr phone number is required for payout.' });
     }
+
+    const accountHolderName = sanitizeText(rawHolderName || '', 100) || null;
 
     // 3. ATOMIC DATABASE TRANSACTION (Lock wallet FIRST to serialize concurrent withdrawal attempts)
     await client.query('BEGIN');
@@ -1016,7 +1029,7 @@ app.post('/api/v1/wallet/withdraw', playerMiddleware, walletLimiter, async (req,
     );
 
     // Insert transaction into ledger
-    const note = `Withdrawal to ${phone} via ${paymentMethod || 'Telebirr'} (Pending Admin Review)`;
+    const note = `Withdrawal to ${phone} via ${paymentMethod} (Pending Admin Review)`;
     const txRes = await client.query(
       `INSERT INTO transactions (wallet_id, tx_type, amount, direction, running_balance, reference_note)
        VALUES ($1, 'withdrawal', $2, -1, $3, $4)
@@ -1030,7 +1043,7 @@ app.post('/api/v1/wallet/withdraw', playerMiddleware, walletLimiter, async (req,
       `INSERT INTO withdrawal_requests (user_id, amount, phone_number, status, transaction_id, payment_method, account_holder_name)
        VALUES ($1, $2, $3, 'pending', $4, $5, $6)
        RETURNING id, amount, phone_number, status, payment_method, account_holder_name, created_at`,
-      [userId, withdrawAmount, phone, txId, paymentMethod || 'telebirr', accountHolderName ? accountHolderName.trim() : null]
+      [userId, withdrawAmount, phone, txId, paymentMethod, accountHolderName ? sanitizeText(String(accountHolderName), 100) : null]
     );
     const newRequest = reqRes.rows[0];
 

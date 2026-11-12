@@ -2,7 +2,10 @@ const express = require('express');
 const router = express.Router();
 const db = require('./db');
 const { hashPassword, verifyPassword, generateToken, adminMiddleware } = require('./adminAuth');
-const { isValidUuid, createRateLimiter } = require('./security');
+const { isValidUuid, createRateLimiter, sanitizeText, sanitizePhone, sanitizeDisplayName, openRedirectGuard } = require('./security');
+
+// Apply open-redirect guard to all admin routes
+router.use(openRedirectGuard);
 
 const adminLoginLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
@@ -48,6 +51,10 @@ const ALLOWED_WITHDRAWAL_STATUSES = new Set(['pending', 'approved', 'rejected', 
 const ALLOWED_ROOM_STATUSES = new Set(['open', 'drawing', 'settled', 'refunded', 'cancelled']);
 const ALLOWED_TIERS = new Set(['starter', 'bronze', 'silver', 'gold']);
 const ALLOWED_CHART_PERIODS = { '7d': 7, '30d': 30, '90d': 90 };
+const ALLOWED_BALANCE_FILTERS = new Set(['zero', 'positive', 'high', '']);
+const ALLOWED_PLAYER_SORT = new Set(['balance_desc', 'balance_asc', 'newest']);
+const ALLOWED_PLAYER_STATUSES = new Set(['active', 'inactive', '']);
+const ALLOWED_PAYMENT_METHODS = new Set(['telebirr', 'cbe']);
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_BULK_ITEMS = 100;
 
@@ -244,13 +251,6 @@ async function deleteWithdrawalsWithAudit({ client, ids, refundPending, adminId,
   return { ok: true, deletedIds: delRes.rows.map(r => r.id), refundedCount };
 }
 
-router.param('id', (req, res, next, id) => {
-  if (!isValidUuid(id)) {
-    return res.status(400).json({ error: 'Invalid ID format' });
-  }
-  next();
-});
-
 // ── Admin Auth ────────────────────────────────────────────────────────────────
 
 router.post('/auth/login', adminLoginLimiter, async (req, res) => {
@@ -321,12 +321,12 @@ router.get('/auth/me', adminMiddleware, async (req, res) => {
 
 router.put('/auth/profile', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
-    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+    const displayName = sanitizeDisplayName(req.body?.displayName, 50);
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const confirmPassword = req.body?.confirmPassword;
 
-    if (!displayName || displayName.length > 50) {
-      return res.status(400).json({ error: 'Display name is required (max 50 characters)' });
+    if (!displayName) {
+      return res.status(400).json({ error: 'Display name must be 2-50 valid characters' });
     }
     if (password.length > 0 && password.trim().length < 6) {
       return res.status(400).json({ error: 'New password must be at least 6 characters' });
@@ -497,6 +497,17 @@ router.get('/players', adminMiddleware, adminReadLimiter, async (req, res) => {
     const offset = (pageNum - 1) * limitNum;
     const cleanSearch = typeof search === 'string' ? search.trim().slice(0, 100) : '';
 
+    // Enum validation for status and balanceFilter (IDOR/param tampering prevention)
+    if (status !== undefined && !ALLOWED_PLAYER_STATUSES.has(String(status))) {
+      return res.status(400).json({ error: 'Invalid status filter' });
+    }
+    if (balanceFilter !== undefined && !ALLOWED_BALANCE_FILTERS.has(String(balanceFilter))) {
+      return res.status(400).json({ error: 'Invalid balance filter' });
+    }
+    if (sortBy !== undefined && sortBy !== '' && !ALLOWED_PLAYER_SORT.has(String(sortBy))) {
+      return res.status(400).json({ error: 'Invalid sort field' });
+    }
+
     let whereClause = `WHERE u.role = 'player'`;
     const params = [];
 
@@ -585,15 +596,16 @@ router.get('/players', adminMiddleware, adminReadLimiter, async (req, res) => {
 
 router.post('/players', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
-    const phoneNumber = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
-    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+    const rawPhone = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
+    const rawName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const telegramId = typeof req.body?.telegramId === 'string' ? req.body.telegramId.trim() : '';
 
-    if (!phoneNumber || !displayName || !password) return res.status(400).json({ error: 'All fields required' });
-    if (phoneNumber.length > 20 || displayName.length > 50) {
-      return res.status(400).json({ error: 'Phone number (max 20) or display name (max 50) too long' });
-    }
+    const phoneNumber = sanitizePhone(rawPhone);
+    if (!phoneNumber) return res.status(400).json({ error: 'Please enter a valid phone number (digits, +, -, spaces only)' });
+    const displayName = sanitizeDisplayName(rawName, 50);
+    if (!displayName) return res.status(400).json({ error: 'Display name must be 2-50 characters with no HTML or special sequences' });
+    if (!password) return res.status(400).json({ error: 'All fields required' });
     if (password.trim().length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
@@ -624,15 +636,15 @@ router.post('/players', adminMiddleware, adminPrivilegedLimiter, async (req, res
 router.put('/players/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const { id } = req.params;
-    const phoneNumber = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
-    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+    const rawPhone = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
+    const rawName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const telegramId = typeof req.body?.telegramId === 'string' ? req.body.telegramId.trim() : '';
 
-    if (!phoneNumber || !displayName) return res.status(400).json({ error: 'Phone and Name required' });
-    if (phoneNumber.length > 20 || displayName.length > 50) {
-      return res.status(400).json({ error: 'Phone number (max 20) or display name (max 50) too long' });
-    }
+    const phoneNumber = sanitizePhone(rawPhone);
+    if (!phoneNumber) return res.status(400).json({ error: 'Please enter a valid phone number' });
+    const displayName = sanitizeDisplayName(rawName, 50);
+    if (!displayName) return res.status(400).json({ error: 'Display name must be 2-50 characters with no special sequences' });
     if (password.length > 0 && password.trim().length < 6) {
       return res.status(400).json({ error: 'New password must be at least 6 characters' });
     }
@@ -1625,17 +1637,19 @@ router.get('/admins', adminMiddleware, adminReadLimiter, async (req, res) => {
 
 router.post('/create-admin', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
-    const phoneNumber = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
-    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+    const rawPhone = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
+    const displayName = sanitizeDisplayName(req.body?.displayName, 50);
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const confirmPassword = req.body?.confirmPassword;
 
-    if (!phoneNumber || !displayName || !password)
-      return res.status(400).json({ error: 'Username/phone, display name, and password are required' });
+    if (!rawPhone || /[^\x20-\x7e]|[<>]/.test(rawPhone)) {
+      return res.status(400).json({ error: 'Username / phone number must use valid ASCII characters' });
+    }
+    const phoneNumber = rawPhone;
+    if (!displayName || !password)
+      return res.status(400).json({ error: 'Username/phone, valid display name (2-50 chars), and password are required' });
     if (phoneNumber.length > 20)
       return res.status(400).json({ error: 'Username / phone number must be 20 characters or less' });
-    if (displayName.length > 50)
-      return res.status(400).json({ error: 'Display name must be 50 characters or less' });
     if (password.trim().length < 6)
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
@@ -1674,8 +1688,8 @@ router.post('/create-admin', adminMiddleware, adminPrivilegedLimiter, async (req
 router.put('/admins/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const targetId = req.params.id;
-    const phoneNumber = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
-    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+    const rawPhone = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
+    const displayName = sanitizeDisplayName(req.body?.displayName, 50);
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const hasIsActive = typeof req.body?.isActive === 'boolean';
     const isActive = req.body?.isActive;
@@ -1689,14 +1703,15 @@ router.put('/admins/:id', adminMiddleware, adminPrivilegedLimiter, async (req, r
       return res.status(404).json({ error: 'Administrator account not found.' });
     }
 
-    if (!phoneNumber || !displayName) {
-      return res.status(400).json({ error: 'Username / phone number and display name are required.' });
+    if (!rawPhone || /[^\x20-\x7e]|[<>]/.test(rawPhone)) {
+      return res.status(400).json({ error: 'Username / phone number must use valid ASCII characters.' });
+    }
+    const phoneNumber = rawPhone;
+    if (!displayName) {
+      return res.status(400).json({ error: 'Display name must be 2-50 valid characters.' });
     }
     if (phoneNumber.length > 20) {
       return res.status(400).json({ error: 'Username / phone number must be 20 characters or less.' });
-    }
-    if (displayName.length > 50) {
-      return res.status(400).json({ error: 'Display name must be 50 characters or less.' });
     }
     if (password.length > 0 && password.trim().length < 6) {
       return res.status(400).json({ error: 'New password must be at least 6 characters.' });
@@ -1897,6 +1912,11 @@ router.put('/withdrawals/:id', adminMiddleware, withdrawalMutationLimiter, async
       return res.status(400).json({ error: 'Invalid status. Must be approved or rejected.' });
     }
 
+    // Sanitize notes to prevent stored XSS via admin notes field
+    if (typeof notes === 'string' && notes.length > 500) {
+      return res.status(400).json({ error: 'Notes must be 500 characters or less' });
+    }
+
     const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
     if (!pwCheck.ok) {
       return res.status(pwCheck.status).json({ error: pwCheck.error });
@@ -1920,7 +1940,7 @@ router.put('/withdrawals/:id', adminMiddleware, withdrawalMutationLimiter, async
       return res.status(400).json({ error: `Request already processed (Status: ${request.status})` });
     }
 
-    const trimmedNotes = typeof notes === 'string' ? notes.trim().slice(0, 500) : '';
+    const trimmedNotes = sanitizeText(notes, 500);
     await applyWithdrawalDecisions({
       client,
       items: [request],
@@ -2046,6 +2066,11 @@ router.post('/withdrawals/bulk-update', adminMiddleware, withdrawalMutationLimit
       return res.status(400).json({ error: 'Status must be approved or rejected.' });
     }
 
+    // Sanitize notes
+    if (typeof notes === 'string' && notes.length > 500) {
+      return res.status(400).json({ error: 'Notes must be 500 characters or less' });
+    }
+
     const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
     if (!pwCheck.ok) {
       return res.status(pwCheck.status).json({ error: pwCheck.error });
@@ -2064,7 +2089,7 @@ router.post('/withdrawals/bulk-update', adminMiddleware, withdrawalMutationLimit
       return res.status(400).json({ error: 'No pending withdrawal requests found among selected IDs.' });
     }
 
-    const trimmedNotes = typeof notes === 'string' ? notes.trim().slice(0, 500) : '';
+    const trimmedNotes = sanitizeText(notes, 500);
     const processedIds = await applyWithdrawalDecisions({
       client,
       items: fetchRes.rows,

@@ -4,6 +4,99 @@ function isValidUuid(val) {
   return typeof val === 'string' && UUID_REGEX.test(val.trim());
 }
 
+// ── Input Sanitization ────────────────────────────────────────────────────────
+
+/**
+ * Strips control characters (except normal whitespace) from a string.
+ * Also strips HTML/XML tags to prevent reflected XSS in error messages.
+ */
+function stripDangerousChars(val) {
+  if (typeof val !== 'string') return '';
+  return val
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')  // control chars
+    .replace(/<[^>]*>/g, '')                               // strip HTML tags
+    .replace(/javascript:/gi, '')                          // strip JS URIs
+    .replace(/data:/gi, '');                               // strip data URIs
+}
+
+/**
+ * Sanitizes a plain text field: trims, strips control chars/HTML, enforces max length.
+ * Returns '' if val is not a string.
+ */
+function sanitizeText(val, maxLen = 500) {
+  if (typeof val !== 'string') return '';
+  return stripDangerousChars(val.trim()).slice(0, maxLen);
+}
+
+/**
+ * Validates an Ethiopian/international phone number.
+ * Allows: 09xxxxxxxx, +2519xxxxxxxx, 07xxxxxxxx patterns, ASCII digits + and - only.
+ * Returns the trimmed phone or null if invalid.
+ */
+const PHONE_RE = /^[+\d][\d\s\-]{7,19}$/;
+function sanitizePhone(val) {
+  if (typeof val !== 'string') return null;
+  const trimmed = val.trim();
+  // Reject non-ASCII characters (IDN/Unicode homograph attack prevention)
+  if (/[^\x20-\x7e]/.test(trimmed)) return null;
+  if (!PHONE_RE.test(trimmed)) return null;
+  return trimmed;
+}
+
+/**
+ * Validates a display name: printable ASCII + limited Unicode letters/marks only.
+ * Rejects HTML tags, scripts, and control characters.
+ */
+function sanitizeDisplayName(val, maxLen = 50) {
+  if (typeof val !== 'string') return null;
+  const trimmed = val.trim();
+  if (/[<>]|javascript:|data:/i.test(trimmed)) return null;
+  const stripped = stripDangerousChars(trimmed);
+  if (stripped.length < 2 || stripped.length > maxLen) return null;
+  // Reject names that are entirely whitespace or only special chars
+  if (!/\S/.test(stripped)) return null;
+  return stripped;
+}
+
+/**
+ * Checks whether a URL value could be an open redirect target.
+ * Blocks: protocol-relative (//), absolute URLs, backslashes, data/javascript URIs.
+ */
+function isOpenRedirectTarget(val) {
+  if (typeof val !== 'string') return false;
+  const v = val.trim();
+  return (
+    /^\/\//i.test(v) ||           // protocol-relative: //evil.com
+    /^[a-zA-Z][a-zA-Z+.-]*:/i.test(v) ||  // absolute URL with any scheme
+    /^\\/.test(v) ||               // backslash path: \evil.com
+    /^%2f%2f/i.test(v) ||          // encoded //
+    /^%5c/i.test(v)                // encoded \
+  );
+}
+
+// ── Open Redirect Guard ───────────────────────────────────────────────────────
+
+const OPEN_REDIRECT_PARAMS = new Set(['redirect', 'next', 'returnto', 'return_to', 'url', 'callback', 'forward', 'dest', 'destination', 'go', 'redir', 'location', 'link']);
+
+/**
+ * Middleware: rejects any query or body parameter that could be used for open redirect abuse.
+ * Any param named like 'redirect', 'next', 'returnTo', 'url', 'callback' etc. that contains
+ * a protocol or starts with // or \ is rejected with 400.
+ */
+function openRedirectGuard(req, res, next) {
+  const toCheck = [req.query, req.body].filter(Boolean);
+  for (const obj of toCheck) {
+    if (typeof obj !== 'object') continue;
+    for (const [key, val] of Object.entries(obj)) {
+      const lk = key.toLowerCase();
+      if (OPEN_REDIRECT_PARAMS.has(lk) && isOpenRedirectTarget(String(val || ''))) {
+        return res.status(400).json({ error: 'Invalid redirect destination' });
+      }
+    }
+  }
+  next();
+}
+
 /**
  * Lightweight in-memory rate limiter suitable for single-instance 1GB VPS deployments.
  * Automatically prunes expired buckets to keep memory footprint bounded.
@@ -245,6 +338,11 @@ function verifyTelebirrReceiver(verifyData, configPhone = '', configName = '') {
 module.exports = {
   UUID_REGEX,
   isValidUuid,
+  sanitizeText,
+  sanitizePhone,
+  sanitizeDisplayName,
+  isOpenRedirectTarget,
+  openRedirectGuard,
   createRateLimiter,
   securityHeaders,
   urlIntegrityGuard,
