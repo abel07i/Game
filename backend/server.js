@@ -153,7 +153,7 @@ async function fetchWithTimeout(url, options = {}, ms = 15000) {
   }
 }
 
-const RECEIVER_INVITE_BONUS = 25.00;
+const RECEIVER_INVITE_BONUS = 0.00;
 const SENDER_REFERRAL_REWARD = 10.00;
 const VALID_PROMO_CODES = ['WELCOME25', 'FASTDERASH'];
 
@@ -280,13 +280,6 @@ async function applyInviteCodeTx(client, { userId, rawCode }) {
     throw err;
   }
 
-  const newBalance = await creditWalletInTx(client, {
-    userId,
-    amount: RECEIVER_INVITE_BONUS,
-    referenceNote: `Invite code bonus (${code})`,
-    idempotencyKey: `invite_bonus:${userId}`
-  });
-
   if (referrerId) {
     await creditWalletInTx(client, {
       userId: referrerId,
@@ -296,9 +289,15 @@ async function applyInviteCodeTx(client, { userId, rawCode }) {
     });
   }
 
+  const receiverWal = await client.query(
+    `SELECT balance FROM wallets WHERE user_id = $1 AND mode = 'real'`,
+    [userId]
+  );
+  const newBalance = receiverWal.rows[0] ? parseFloat(receiverWal.rows[0].balance) : 0;
+
   return {
     code,
-    bonus: RECEIVER_INVITE_BONUS,
+    bonus: 0,
     senderReward: referrerId ? SENDER_REFERRAL_REWARD : 0,
     referrerId,
     newBalance
@@ -744,8 +743,10 @@ app.post('/api/v1/user/invite', playerMiddleware, walletLimiter, async (req, res
 
     res.json({
       success: true,
-      message: `Invite code applied! ${result.bonus} ETB welcome bonus has been credited to your wallet.`,
-      bonus: result.bonus,
+      message: result.senderReward > 0
+        ? `Invite code applied! Your inviter earned ${result.senderReward} ETB.`
+        : 'Invite code applied!',
+      bonus: 0,
       senderReward: result.senderReward,
       newBalance: result.newBalance
     });

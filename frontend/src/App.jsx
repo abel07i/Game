@@ -819,7 +819,7 @@ export default function App() {
             totalInvites: "የተጋበዙ",
             totalEarnings: "የግብዣ ገቢ",
             inviteCodeQuestion: "የግብዣ ኮድ አለዎት?",
-            inviteCodeDesc: "የጓደኛዎን የግብዣ ኮድ በማስገባት ጉርሻ ያግኙ",
+            inviteCodeDesc: "የጓደኛዎን የግብዣ ኮድ ያስገቡ — ላኪው 10 ብር ያገኛሉ!",
             appliedLabel: "ተቀብሏል",
             applyBtn: "ተግብር",
             inviteCodeApplied: "ተተግብሯል",
@@ -829,9 +829,9 @@ export default function App() {
             inviteLinkCopied: "የግብዣ ሊንኩ ተቀድቷል!",
             copyLinkBtn: "ሊንኩን ቅዳ",
             shareLinkBtn: "ሊንክ ላክ",
-            inviteSenderRewardDesc: "ሊንኩን ለጓደኞችዎ ይላኩ — በሊንክዎ ሲመዘገቡ 10 ብር ያግኙ!",
+            inviteSenderRewardDesc: "ሊንኩን ለጓደኞችዎ ይላኩ — በሊንክዎ ሲመዘገቡ እርስዎ (ላኪው) ብቻ 10 ብር ያገኛሉ!",
             inviteOptionalPlaceholder: "የግብዣ ኮድ (አማራጭ - ካለዎት)",
-            invitedBanner: (code) => `🎁 በግብዣ ኮድ ${code} ተጋብዘዋል! ይመዝገቡና ጉርሻ ያግኙ።`,
+            invitedBanner: (code) => `🎁 በግብዣ ኮድ ${code} ተጋብዘዋል! ሲመዘገቡ ላኪው 10 ብር ያገኛሉ።`,
             soundVoiceLabel: "ድምጽ እና የጥሪ ሙዚቃ",
             soundOn: "በርቷል",
             soundOff: "ጠፍቷል",
@@ -1166,7 +1166,7 @@ export default function App() {
             totalInvites: "Total Invites",
             totalEarnings: "Invite Earnings",
             inviteCodeQuestion: "Have an invite code?",
-            inviteCodeDesc: "Enter an invite code to claim rewards & bonus",
+            inviteCodeDesc: "Enter a friend's invite code — the sender earns 10 Birr!",
             appliedLabel: "Applied",
             applyBtn: "Apply",
             inviteCodeApplied: "Applied",
@@ -1176,9 +1176,9 @@ export default function App() {
             inviteLinkCopied: "Invite link copied!",
             copyLinkBtn: "Copy Link",
             shareLinkBtn: "Send Link",
-            inviteSenderRewardDesc: "Send this link to friends — you earn 10 Birr for every signup!",
+            inviteSenderRewardDesc: "Send this link to friends — only you (the sender) earn 10 Birr per signup!",
             inviteOptionalPlaceholder: "Invite Code (Optional)",
-            invitedBanner: (code) => `🎁 Invited with code ${code}! Complete registration to claim.`,
+            invitedBanner: (code) => `🎁 Invited with code ${code}! Sign up to reward the sender 10 Birr.`,
             soundVoiceLabel: "Sound & Voice",
             soundOn: "ON",
             soundOff: "OFF",
@@ -1621,8 +1621,8 @@ export default function App() {
                 setInviteCodeInput(formData.inviteCode.trim().toUpperCase());
                 showToast(
                     language === 'am'
-                        ? `🎉 እንኳን ደህና መጡ! +${data.inviteBonus} ብር ጉርሻ ገብቷል!`
-                        : `🎉 Welcome! +${data.inviteBonus} ETB invite bonus credited!`
+                        ? '🎉 በተሳካ ሁኔታ ተመዝግበዋል! የግብዣ ኮዱ ተተግብሯል።'
+                        : '🎉 Registered successfully! Invite code applied.'
                 );
             }
             setActiveTab('rooms');
