@@ -385,10 +385,11 @@ export default function App() {
     const [walletModal, setWalletModal] = useState({ open: false, action: null, amount: '', transactionId: '', loading: false });
     const [walletTabState, setWalletTabState] = useState({ active: 'deposit', amount: '', transactionId: '', phone: '', loading: false });
     const [myWithdrawals, setMyWithdrawals] = useState([]);
-    const [inviteCodeInput, setInviteCodeInput] = useState('');
+    const [inviteCodeInput, setInviteCodeInput] = useState(() => (localStorage.getItem('fastderash_ref') || '').toUpperCase());
     const [appliedInvite, setAppliedInvite] = useState(false);
     const [inviteLoading, setInviteLoading] = useState(false);
     const [inviteMessage, setInviteMessage] = useState(null);
+    const [inviteStats, setInviteStats] = useState({ ownInviteCode: '', totalInvites: 0, referralEarnings: 0 });
     const [systemConfig, setSystemConfig] = useState({ telebirrPhone: '0949626463', telebirrName: 'Abel Wondmeneh', seatQuotas: null });
     const [wizard, setWizard] = useState({ groupSize: 10, seatNumbers: [1], jackpot: 500 });
     const [wizardStep, setWizardStep] = useState(1); // 1 = choose prize, 2 = choose players & join
@@ -816,7 +817,7 @@ export default function App() {
             playWallet: "የጨዋታ ዋሌት",
             gamesWon: "ያሸነፏቸው",
             totalInvites: "የተጋበዙ",
-            totalEarnings: "ጠቅላላ ገቢ",
+            totalEarnings: "የግብዣ ገቢ",
             inviteCodeQuestion: "የግብዣ ኮድ አለዎት?",
             inviteCodeDesc: "የጓደኛዎን የግብዣ ኮድ በማስገባት ጉርሻ ያግኙ",
             appliedLabel: "ተቀብሏል",
@@ -824,6 +825,13 @@ export default function App() {
             inviteCodeApplied: "ተተግብሯል",
             yourInviteCode: "የእርስዎ የግብዣ ኮድ:",
             inviteCodeCopied: "የግብዣ ኮድዎ ተቀድቷል!",
+            yourInviteLink: "የእርስዎ የግብዣ ሊንክ:",
+            inviteLinkCopied: "የግብዣ ሊንኩ ተቀድቷል!",
+            copyLinkBtn: "ሊንኩን ቅዳ",
+            shareLinkBtn: "ሊንክ ላክ",
+            inviteSenderRewardDesc: "ሊንኩን ለጓደኞችዎ ይላኩ — በሊንክዎ ሲመዘገቡ 10 ብር ያግኙ!",
+            inviteOptionalPlaceholder: "የግብዣ ኮድ (አማራጭ - ካለዎት)",
+            invitedBanner: (code) => `🎁 በግብዣ ኮድ ${code} ተጋብዘዋል! ይመዝገቡና ጉርሻ ያግኙ።`,
             soundVoiceLabel: "ድምጽ እና የጥሪ ሙዚቃ",
             soundOn: "በርቷል",
             soundOff: "ጠፍቷል",
@@ -1156,7 +1164,7 @@ export default function App() {
             playWallet: "Play Wallet",
             gamesWon: "Games Won",
             totalInvites: "Total Invites",
-            totalEarnings: "Total Earnings",
+            totalEarnings: "Invite Earnings",
             inviteCodeQuestion: "Have an invite code?",
             inviteCodeDesc: "Enter an invite code to claim rewards & bonus",
             appliedLabel: "Applied",
@@ -1164,6 +1172,13 @@ export default function App() {
             inviteCodeApplied: "Applied",
             yourInviteCode: "Your invite code:",
             inviteCodeCopied: "Invite code copied!",
+            yourInviteLink: "Your invite link:",
+            inviteLinkCopied: "Invite link copied!",
+            copyLinkBtn: "Copy Link",
+            shareLinkBtn: "Send Link",
+            inviteSenderRewardDesc: "Send this link to friends — you earn 10 Birr for every signup!",
+            inviteOptionalPlaceholder: "Invite Code (Optional)",
+            invitedBanner: (code) => `🎁 Invited with code ${code}! Complete registration to claim.`,
             soundVoiceLabel: "Sound & Voice",
             soundOn: "ON",
             soundOff: "OFF",
@@ -1303,14 +1318,55 @@ export default function App() {
             authFetch(`${API_URL}/api/v1/user/invite`)
                 .then(res => res.json())
                 .then(data => {
-                    if (data && data.hasRedeemed) {
-                        setAppliedInvite(true);
-                        setInviteCodeInput(data.inviteCode || '');
+                    if (data) {
+                        setInviteStats({
+                            ownInviteCode: data.ownInviteCode || '',
+                            totalInvites: Number(data.totalInvites) || 0,
+                            referralEarnings: Number(data.referralEarnings) || 0
+                        });
+                        if (data.ownInviteCode) {
+                            setUserState(prev => prev ? { ...prev, inviteCode: data.ownInviteCode } : prev);
+                        }
+                        if (data.hasRedeemed) {
+                            setAppliedInvite(true);
+                            setInviteCodeInput(data.inviteCode || '');
+                            localStorage.removeItem('fastderash_ref');
+                        } else {
+                            setAppliedInvite(false);
+                            const savedRef = (localStorage.getItem('fastderash_ref') || '').trim().toUpperCase();
+                            if (savedRef) setInviteCodeInput(savedRef);
+                        }
                     }
                 })
                 .catch(() => { });
+        } else {
+            setInviteStats({ ownInviteCode: '', totalInvites: 0, referralEarnings: 0 });
+            setAppliedInvite(false);
+            setInviteMessage(null);
+            setInviteCodeInput((localStorage.getItem('fastderash_ref') || '').toUpperCase());
         }
     }, [user?.id, mode]);
+
+    useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const rawRef = params.get('ref') || params.get('invite');
+        if (rawRef && rawRef.trim()) {
+            const cleaned = rawRef.trim().toUpperCase();
+            localStorage.setItem('fastderash_ref', cleaned);
+            setFormData(prev => ({ ...prev, inviteCode: cleaned }));
+            setInviteCodeInput(cleaned);
+            if (!user) {
+                setIsLogin(false);
+                setIsForgotPassword(false);
+                setActiveTab('home');
+            }
+            params.delete('ref');
+            params.delete('invite');
+            const qs = params.toString();
+            const nextUrl = window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash;
+            window.history.replaceState({}, '', nextUrl);
+        }
+    }, []);
 
     useEffect(() => {
         const socket = getSocket();
@@ -1517,7 +1573,13 @@ export default function App() {
     }, []);
 
     const [isLogin, setIsLogin] = useState(true);
-    const [formData, setFormData] = useState({ phoneNumber: '', password: '', displayName: '', confirmPassword: '' });
+    const [formData, setFormData] = useState(() => ({
+        phoneNumber: '',
+        password: '',
+        displayName: '',
+        confirmPassword: '',
+        inviteCode: (localStorage.getItem('fastderash_ref') || '').toUpperCase()
+    }));
     const [isForgotPassword, setIsForgotPassword] = useState(false);
 
     const handleAuth = async (e) => {
@@ -1531,10 +1593,18 @@ export default function App() {
 
         try {
             const endpoint = isLogin ? 'login' : 'register';
+            const payload = isLogin
+                ? { phoneNumber: formData.phoneNumber, password: formData.password }
+                : {
+                    phoneNumber: formData.phoneNumber,
+                    displayName: formData.displayName,
+                    password: formData.password,
+                    ...(formData.inviteCode?.trim() ? { inviteCode: formData.inviteCode.trim().toUpperCase() } : {})
+                };
             const res = await fetch(`${API_URL}/api/v1/auth/${endpoint}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(formData)
+                body: JSON.stringify(payload)
             });
             const data = await res.json();
             if (data.error) {
@@ -1543,8 +1613,18 @@ export default function App() {
             }
             // Store token for authenticated API calls
             if (data.token) localStorage.setItem('fastderash_token', data.token);
-            setUser({ id: data.userId, name: data.username, balance: data.balance });
+            setUser({ id: data.userId, name: data.username, balance: data.balance, inviteCode: data.inviteCode });
             setMode(data.mode);
+            if (!isLogin && data.inviteApplied) {
+                localStorage.removeItem('fastderash_ref');
+                setAppliedInvite(true);
+                setInviteCodeInput(formData.inviteCode.trim().toUpperCase());
+                showToast(
+                    language === 'am'
+                        ? `🎉 እንኳን ደህና መጡ! +${data.inviteBonus} ብር ጉርሻ ገብቷል!`
+                        : `🎉 Welcome! +${data.inviteBonus} ETB invite bonus credited!`
+                );
+            }
             setActiveTab('rooms');
         } catch (e) {
             console.error("Auth failed", e);
@@ -1855,8 +1935,9 @@ export default function App() {
             setInviteMessage({ type: 'error', text: language === 'am' ? 'እባክዎ የግብዣ ኮድ ያስገቡ' : 'Please enter an invite code' });
             return;
         }
-        const myCode = `EQUB-${(user?.id || '').slice(0, 4).toUpperCase()}`;
-        if (code === myCode) {
+        const myCode4 = `EQUB-${(user?.id || '').slice(0, 4).toUpperCase()}`;
+        const myCode6 = `EQUB-${(user?.id || '').slice(0, 6).toUpperCase()}`;
+        if (code === myCode4 || code === myCode6 || (inviteStats.ownInviteCode && code === inviteStats.ownInviteCode)) {
             setInviteMessage({ type: 'error', text: language === 'am' ? 'የራስዎን የግብዣ ኮድ መጠቀም አይችሉም' : 'You cannot use your own invite code' });
             return;
         }
@@ -1872,10 +1953,23 @@ export default function App() {
                 setInviteMessage({ type: 'error', text: data.error });
             } else {
                 setAppliedInvite(true);
+                localStorage.removeItem('fastderash_ref');
                 setInviteMessage({ type: 'success', text: data.message || (language === 'am' ? 'የግብዣ ኮድ ተቀባይነት አግኝቷል!' : 'Invite code applied successfully!') });
                 if (data.newBalance !== undefined) {
                     setUser(u => ({ ...u, balance: data.newBalance }));
                 }
+                authFetch(`${API_URL}/api/v1/user/invite`)
+                    .then(r => r.json())
+                    .then(inv => {
+                        if (inv) {
+                            setInviteStats({
+                                ownInviteCode: inv.ownInviteCode || '',
+                                totalInvites: Number(inv.totalInvites) || 0,
+                                referralEarnings: Number(inv.referralEarnings) || 0
+                            });
+                        }
+                    })
+                    .catch(() => { });
             }
         } catch {
             setInviteMessage({ type: 'error', text: 'Network error, please try again' });
@@ -1953,7 +2047,27 @@ export default function App() {
         setActiveTab('rooms');
     };
 
-    const userInviteCode = user ? `EQUB-${user.id.slice(0, 4).toUpperCase()}` : 'EQUB-7721';
+    const userInviteCode = inviteStats.ownInviteCode || user?.inviteCode || (user ? `EQUB-${user.id.slice(0, 4).toUpperCase()}` : 'EQUB-7721');
+    const userInviteLink = typeof window !== 'undefined' && user ? `${window.location.origin}/?ref=${encodeURIComponent(userInviteCode)}` : '';
+
+    const handleShareInviteLink = async () => {
+        if (!userInviteLink) return;
+        const shareText = language === 'am'
+            ? `Fast Ekub ይቀላቀሉ! የእኔን የግብዣ ሊንክ ይጠቀሙ: ${userInviteLink}`
+            : `Join me on Fast Ekub! Sign up with my invite link: ${userInviteLink}`;
+        if (navigator.share) {
+            try {
+                await navigator.share({ title: 'Fast Ekub', text: shareText, url: userInviteLink });
+                return;
+            } catch {
+                // User dismissed share sheet or fallback to clipboard
+            }
+        }
+        try {
+            await navigator.clipboard.writeText(userInviteLink);
+            showToast(t('inviteLinkCopied'));
+        } catch { }
+    };
 
     const activeRoom = useMemo(() => {
         if (!seatModal.open || !seatModal.room) return null;
@@ -2511,13 +2625,21 @@ export default function App() {
                                                             </div>
 
                                                             <form className="space-y-3" onSubmit={handleAuth}>
+                                                                {!isLogin && formData.inviteCode && (
+                                                                    <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/35 px-3 py-2 text-xs text-emerald-300 font-medium">
+                                                                        {t('invitedBanner', formData.inviteCode)}
+                                                                    </div>
+                                                                )}
                                                                 {!isLogin && (
                                                                     <input type="text" placeholder={t('fullName')} required value={formData.displayName} onChange={e => setFormData({ ...formData, displayName: e.target.value })} className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white placeholder-white/30 focus:border-equb-500/50 focus:outline-none focus:ring-1 focus:ring-equb-500/50 transition" />
                                                                 )}
                                                                 <input type="text" placeholder={t('phone')} required value={formData.phoneNumber} onChange={e => setFormData({ ...formData, phoneNumber: e.target.value })} className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white placeholder-white/30 focus:border-equb-500/50 focus:outline-none focus:ring-1 focus:ring-equb-500/50 transition" />
                                                                 <input type="password" placeholder={t('pass')} required value={formData.password} onChange={e => setFormData({ ...formData, password: e.target.value })} className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white placeholder-white/30 focus:border-equb-500/50 focus:outline-none focus:ring-1 focus:ring-equb-500/50 transition" />
                                                                 {!isLogin && (
-                                                                    <input type="password" placeholder={t('confirmPass')} required value={formData.confirmPassword} onChange={e => setFormData({ ...formData, confirmPassword: e.target.value })} className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white placeholder-white/30 focus:border-equb-500/50 focus:outline-none focus:ring-1 focus:ring-equb-500/50 transition" />
+                                                                    <>
+                                                                        <input type="password" placeholder={t('confirmPass')} required value={formData.confirmPassword} onChange={e => setFormData({ ...formData, confirmPassword: e.target.value })} className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white placeholder-white/30 focus:border-equb-500/50 focus:outline-none focus:ring-1 focus:ring-equb-500/50 transition" />
+                                                                        <input type="text" placeholder={t('inviteOptionalPlaceholder')} value={formData.inviteCode} onChange={e => setFormData({ ...formData, inviteCode: e.target.value.toUpperCase() })} className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm font-mono uppercase text-white placeholder-white/30 focus:border-equb-500/50 focus:outline-none focus:ring-1 focus:ring-equb-500/50 transition" />
+                                                                    </>
                                                                 )}
                                                                 {isLogin && (
                                                                     <button type="button" onClick={() => setIsForgotPassword(true)} className="w-full text-right text-xs text-equb-400 hover:text-equb-300 transition">{t('forgotPass')}</button>
@@ -3443,16 +3565,16 @@ export default function App() {
                                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><line x1="19" y1="8" x2="19" y2="14"></line><line x1="22" y1="11" x2="16" y2="11"></line></svg>
                                                 <span>{t('totalInvites')}</span>
                                             </div>
-                                            <div className="text-base sm:text-lg font-black text-white">0</div>
+                                            <div className="text-base sm:text-lg font-black text-white">{inviteStats.totalInvites}</div>
                                         </div>
 
-                                        {/* Total Earning */}
+                                        {/* Invite Earnings */}
                                         <div className="bg-white/[0.03] border border-white/5 rounded-xl p-2.5 sm:p-3 hover:bg-white/[0.06] transition">
                                             <div className="flex items-center gap-1.5 text-emerald-400 text-[10px] sm:text-[11px] font-bold mb-1">
                                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
                                                 <span>{t('totalEarnings')}</span>
                                             </div>
-                                            <div className="text-base sm:text-lg font-black text-white">0 <span className="text-[10px] font-bold text-white/40">{t('birLabel')}</span></div>
+                                            <div className="text-base sm:text-lg font-black text-white">{inviteStats.referralEarnings} <span className="text-[10px] font-bold text-white/40">{t('birLabel')}</span></div>
                                         </div>
                                     </div>
                                 </div>
@@ -3509,25 +3631,62 @@ export default function App() {
                                     )}
 
                                     {user && (
-                                        <div className="pt-2.5 border-t border-white/5 flex items-center justify-between text-xs">
-                                            <span className="text-white/40 text-[11px]">
-                                                {t('yourInviteCode')}
-                                            </span>
-                                            <div className="flex items-center gap-1.5">
-                                                <span className="font-mono font-bold text-equb-400 bg-equb-500/10 px-2 py-0.5 rounded-md border border-equb-500/20 text-xs">
-                                                    {userInviteCode}
+                                        <div className="pt-3 border-t border-white/10 space-y-3 text-xs">
+                                            <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/25 px-3 py-2 text-[11px] font-semibold text-emerald-300 flex items-center gap-2">
+                                                <span>💸</span>
+                                                <span>{t('inviteSenderRewardDesc')}</span>
+                                            </div>
+
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-white/50 text-[11px]">
+                                                    {t('yourInviteCode')}
                                                 </span>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        navigator.clipboard.writeText(userInviteCode);
-                                                        showToast(t('inviteCodeCopied'));
-                                                    }}
-                                                    className="text-white/60 hover:text-white p-1 hover:bg-white/10 rounded-md transition"
-                                                    title="Copy Code"
-                                                >
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></svg>
-                                                </button>
+                                                <div className="flex items-center gap-1.5">
+                                                    <span className="font-mono font-bold text-equb-400 bg-equb-500/10 px-2 py-0.5 rounded-md border border-equb-500/20 text-xs">
+                                                        {userInviteCode}
+                                                    </span>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            navigator.clipboard.writeText(userInviteCode);
+                                                            showToast(t('inviteCodeCopied'));
+                                                        }}
+                                                        className="text-white/60 hover:text-white p-1 hover:bg-white/10 rounded-md transition"
+                                                        title="Copy Code"
+                                                    >
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></svg>
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            <div className="space-y-1.5">
+                                                <div className="text-white/50 text-[11px]">{t('yourInviteLink')}</div>
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        type="text"
+                                                        readOnly
+                                                        value={userInviteLink}
+                                                        onClick={(e) => e.target.select()}
+                                                        className="flex-1 min-w-0 bg-black/40 border border-white/10 rounded-xl px-2.5 py-2 text-[11px] font-mono text-white/80 focus:outline-none"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            navigator.clipboard.writeText(userInviteLink);
+                                                            showToast(t('inviteLinkCopied'));
+                                                        }}
+                                                        className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/10 text-white text-[11px] font-bold whitespace-nowrap transition active:scale-95"
+                                                    >
+                                                        {t('copyLinkBtn')}
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleShareInviteLink}
+                                                        className="px-3 py-2 rounded-xl bg-gold-500 hover:bg-gold-400 text-black text-[11px] font-extrabold whitespace-nowrap transition active:scale-95"
+                                                    >
+                                                        {t('shareLinkBtn')}
+                                                    </button>
+                                                </div>
                                             </div>
                                         </div>
                                     )}

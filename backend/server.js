@@ -153,14 +153,169 @@ async function fetchWithTimeout(url, options = {}, ms = 15000) {
   }
 }
 
+const RECEIVER_INVITE_BONUS = 25.00;
+const SENDER_REFERRAL_REWARD = 10.00;
+const VALID_PROMO_CODES = ['WELCOME25', 'FASTDERASH'];
+
+function formatOwnInviteCode(userId, dbInviteCode) {
+  if (dbInviteCode && String(dbInviteCode).trim()) {
+    return String(dbInviteCode).trim().toUpperCase();
+  }
+  return `EQUB-${String(userId).slice(0, 4).toUpperCase()}`;
+}
+
+function inviteError(message, status = 400) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+async function resolveReferrerForCode(client, userId, rawCode) {
+  const code = typeof rawCode === 'string' ? rawCode.trim().toUpperCase() : '';
+  if (!code) throw inviteError('Invite code is required');
+
+  const userRow = await client.query('SELECT id, invite_code FROM users WHERE id = $1', [userId]);
+  const ownDbCode = userRow.rows[0]?.invite_code ? String(userRow.rows[0].invite_code).trim().toUpperCase() : null;
+  const ownPrefix4 = `EQUB-${String(userId).slice(0, 4).toUpperCase()}`;
+  const ownPrefix6 = `EQUB-${String(userId).slice(0, 6).toUpperCase()}`;
+  if (code === ownDbCode || code === ownPrefix4 || code === ownPrefix6) {
+    throw inviteError('You cannot use your own invite code.');
+  }
+
+  if (VALID_PROMO_CODES.includes(code)) {
+    return { code, referrerId: null };
+  }
+
+  let referrerRes = await client.query(
+    `SELECT id FROM users WHERE UPPER(invite_code) = $1 AND id != $2 AND is_active = true LIMIT 1`,
+    [code, userId]
+  );
+
+  if (referrerRes.rows.length === 0) {
+    const match = code.match(/^EQUB-([A-F0-9]{4,8})$/i);
+    if (match) {
+      const prefix = match[1].toLowerCase();
+      referrerRes = await client.query(
+        `SELECT id FROM users WHERE LOWER(id::text) LIKE $1 AND id != $2 AND is_active = true ORDER BY created_at ASC LIMIT 1`,
+        [`${prefix}%`, userId]
+      );
+    }
+  }
+
+  if (referrerRes.rows.length === 0) {
+    throw inviteError('Invalid invite code. Please enter a valid referral code (e.g. EQUB-A1B2C3).');
+  }
+
+  const referrerId = referrerRes.rows[0].id;
+  // Prevent two accounts from mutually referring each other in a loop
+  const circular = await client.query(
+    `SELECT 1 FROM user_invites WHERE user_id = $1 AND referrer_id = $2`,
+    [referrerId, userId]
+  );
+  if (circular.rows.length > 0) {
+    throw inviteError('Mutual referral codes are not allowed.');
+  }
+
+  return { code, referrerId };
+}
+
+async function creditWalletInTx(client, { userId, amount, referenceNote, idempotencyKey }) {
+  if (idempotencyKey) {
+    const dup = await client.query('SELECT 1 FROM transactions WHERE idempotency_key = $1', [idempotencyKey]);
+    if (dup.rows.length > 0) {
+      const existingWal = await client.query(`SELECT balance FROM wallets WHERE user_id = $1 AND mode = 'real'`, [userId]);
+      return existingWal.rows[0] ? parseFloat(existingWal.rows[0].balance) : 0;
+    }
+  }
+
+  let walRes = await client.query(
+    `SELECT id, balance FROM wallets WHERE user_id = $1 AND mode = 'real' FOR UPDATE`,
+    [userId]
+  );
+
+  let walletId;
+  let newBalance;
+  if (walRes.rowCount === 0) {
+    const ins = await client.query(
+      `INSERT INTO wallets (user_id, mode, balance, total_deposited) VALUES ($1, 'real', $2, $2) RETURNING id, balance`,
+      [userId, amount]
+    );
+    walletId = ins.rows[0].id;
+    newBalance = parseFloat(ins.rows[0].balance);
+  } else {
+    const upd = await client.query(
+      `UPDATE wallets SET balance = balance + $1, total_deposited = total_deposited + $1, updated_at = NOW() WHERE id = $2 RETURNING id, balance`,
+      [amount, walRes.rows[0].id]
+    );
+    walletId = upd.rows[0].id;
+    newBalance = parseFloat(upd.rows[0].balance);
+  }
+
+  await client.query(
+    `INSERT INTO transactions (wallet_id, tx_type, amount, direction, running_balance, reference_note, idempotency_key)
+     VALUES ($1, 'deposit', $2, 1, $3, $4, $5)`,
+    [walletId, amount, newBalance, referenceNote, idempotencyKey]
+  );
+
+  return newBalance;
+}
+
+async function applyInviteCodeTx(client, { userId, rawCode }) {
+  const { code, referrerId } = await resolveReferrerForCode(client, userId, rawCode);
+
+  const already = await client.query('SELECT 1 FROM user_invites WHERE user_id = $1', [userId]);
+  if (already.rows.length > 0) {
+    throw inviteError('You have already redeemed an invite code.');
+  }
+
+  try {
+    await client.query(
+      `INSERT INTO user_invites (user_id, invite_code, bonus_amount, referrer_id) VALUES ($1, $2, $3, $4)`,
+      [userId, code, RECEIVER_INVITE_BONUS, referrerId]
+    );
+  } catch (err) {
+    if (err.code === '23505') {
+      throw inviteError('You have already redeemed an invite code.');
+    }
+    throw err;
+  }
+
+  const newBalance = await creditWalletInTx(client, {
+    userId,
+    amount: RECEIVER_INVITE_BONUS,
+    referenceNote: `Invite code bonus (${code})`,
+    idempotencyKey: `invite_bonus:${userId}`
+  });
+
+  if (referrerId) {
+    await creditWalletInTx(client, {
+      userId: referrerId,
+      amount: SENDER_REFERRAL_REWARD,
+      referenceNote: `Referral reward (10 ETB) from invite ${code}`,
+      idempotencyKey: `referral_reward:${userId}`
+    });
+  }
+
+  return {
+    code,
+    bonus: RECEIVER_INVITE_BONUS,
+    senderReward: referrerId ? SENDER_REFERRAL_REWARD : 0,
+    referrerId,
+    newBalance
+  };
+}
+
 // ── Auth Routes ───────────────────────────────────────────────────────────────
 
 app.post('/api/v1/auth/register', registerLimiter, async (req, res) => {
+  const client = await db.getClient();
+  let inTx = false;
   try {
     const phoneNumber = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
     const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const telegramId = typeof req.body?.telegramId === 'string' && req.body.telegramId.trim() ? req.body.telegramId.trim() : null;
+    const rawInviteCode = typeof req.body?.inviteCode === 'string' ? req.body.inviteCode.trim() : '';
 
     if (!phoneNumber || !displayName || !password)
       return res.status(400).json({ error: 'All fields are required' });
@@ -173,34 +328,76 @@ app.post('/api/v1/auth/register', registerLimiter, async (req, res) => {
 
     const passwordHash = await hashPassword(password);
 
+    await client.query('BEGIN');
+    inTx = true;
+
     // Duplicate check
-    const existing = await db.query('SELECT id FROM users WHERE phone_number = $1', [phoneNumber]);
-    if (existing.rows.length > 0)
+    const existing = await client.query('SELECT id FROM users WHERE phone_number = $1', [phoneNumber]);
+    if (existing.rows.length > 0) {
+      await client.query('ROLLBACK');
+      inTx = false;
       return res.status(400).json({ error: 'Phone number already registered' });
+    }
 
     // Check if telegram_id is already in use (if provided)
     if (telegramId) {
-      const telegramCheck = await db.query('SELECT id FROM users WHERE telegram_id = $1', [telegramId]);
-      if (telegramCheck.rows.length > 0)
+      const telegramCheck = await client.query('SELECT id FROM users WHERE telegram_id = $1', [telegramId]);
+      if (telegramCheck.rows.length > 0) {
+        await client.query('ROLLBACK');
+        inTx = false;
         return res.status(400).json({ error: 'Telegram ID already linked to another account' });
+      }
     }
 
     // Create user with optional telegram_id
-    const userRes = await db.query(
+    const userRes = await client.query(
       `INSERT INTO users (phone_number, display_name, password_hash, role, telegram_id)
        VALUES ($1, $2, $3, 'player', $4) RETURNING id`,
       [phoneNumber, displayName, passwordHash, telegramId]
     );
     const userId = userRes.rows[0].id;
+    const ownInviteCode = `EQUB-${String(userId).slice(0, 6).toUpperCase()}`;
+    await client.query(`UPDATE users SET invite_code = $1 WHERE id = $2`, [ownInviteCode, userId]);
 
-    // Auto-create wallet with 0 balance
-    const balance = await walletLedger.getBalance(userId, 'real');
+    // Auto-create wallet with 0 balance inside transaction
+    await client.query(
+      `INSERT INTO wallets (user_id, mode, balance) VALUES ($1, 'real', 0) ON CONFLICT (user_id, mode) DO NOTHING`,
+      [userId]
+    );
+    let balance = 0;
+    let inviteApplied = false;
+    let inviteBonus = 0;
+
+    if (rawInviteCode) {
+      const inviteResult = await applyInviteCodeTx(client, { userId, rawCode: rawInviteCode });
+      balance = inviteResult.newBalance;
+      inviteApplied = true;
+      inviteBonus = inviteResult.bonus;
+    }
+
+    await client.query('COMMIT');
+    inTx = false;
+
     const token = generatePlayerToken(userId);
-
-    res.json({ userId, username: displayName, balance, mode: 'real', token });
+    res.json({
+      userId,
+      username: displayName,
+      balance,
+      mode: 'real',
+      token,
+      inviteCode: ownInviteCode,
+      inviteApplied,
+      inviteBonus
+    });
   } catch (err) {
+    if (inTx) await client.query('ROLLBACK').catch(() => {});
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message });
+    }
     console.error('Register error:', err);
     res.status(500).json({ error: 'Registration failed' });
+  } finally {
+    client.release();
   }
 });
 
@@ -212,7 +409,7 @@ app.post('/api/v1/auth/login', loginLimiter, async (req, res) => {
       return res.status(400).json({ error: 'All fields are required' });
 
     const userRes = await db.query(
-      `SELECT id, display_name, password_hash, is_active FROM users WHERE phone_number = $1`,
+      `SELECT id, display_name, password_hash, is_active, invite_code FROM users WHERE phone_number = $1`,
       [phoneNumber]
     );
 
@@ -234,11 +431,12 @@ app.post('/api/v1/auth/login', loginLimiter, async (req, res) => {
     }
     const balance = await walletLedger.getBalance(user.id, 'real');
     const token = generatePlayerToken(user.id);
+    const ownInviteCode = formatOwnInviteCode(user.id, user.invite_code);
 
     // Update last login
     await db.query(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [user.id]);
 
-    res.json({ userId: user.id, username: user.display_name, balance, mode: 'real', token });
+    res.json({ userId: user.id, username: user.display_name, balance, mode: 'real', token, inviteCode: ownInviteCode });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Login failed' });
@@ -502,81 +700,60 @@ app.get('/api/v1/user/invite', playerMiddleware, async (req, res) => {
   try {
     const userId = req.playerId;
 
-    const existing = await db.query('SELECT * FROM user_invites WHERE user_id = $1', [userId]);
-    if (existing.rows.length > 0) {
-      return res.json({ hasRedeemed: true, inviteCode: existing.rows[0].invite_code, bonus: existing.rows[0].bonus_amount });
-    }
-    res.json({ hasRedeemed: false });
+    const [userRes, existingRes, statsRes] = await Promise.all([
+      db.query('SELECT invite_code FROM users WHERE id = $1', [userId]),
+      db.query('SELECT invite_code, bonus_amount FROM user_invites WHERE user_id = $1', [userId]),
+      db.query('SELECT COUNT(*)::int AS total_invites FROM user_invites WHERE referrer_id = $1', [userId])
+    ]);
+
+    const ownInviteCode = formatOwnInviteCode(userId, userRes.rows[0]?.invite_code);
+    const totalInvites = statsRes.rows[0]?.total_invites || 0;
+    const referralEarnings = totalInvites * SENDER_REFERRAL_REWARD;
+    const redeemed = existingRes.rows[0];
+
+    return res.json({
+      ownInviteCode,
+      hasRedeemed: Boolean(redeemed),
+      inviteCode: redeemed ? redeemed.invite_code : undefined,
+      bonus: redeemed ? redeemed.bonus_amount : undefined,
+      totalInvites,
+      referralEarnings,
+      senderReward: SENDER_REFERRAL_REWARD,
+      welcomeBonus: RECEIVER_INVITE_BONUS
+    });
   } catch (err) {
-    res.json({ hasRedeemed: false });
+    res.status(500).json({ error: 'Failed to load invite details' });
   }
 });
 
 app.post('/api/v1/user/invite', playerMiddleware, walletLimiter, async (req, res) => {
+  const client = await db.getClient();
+  let inTx = false;
   try {
     const userId = req.playerId;
-    const { inviteCode } = req.body;
-    if (!inviteCode || !inviteCode.trim()) return res.status(400).json({ error: 'Invite code is required' });
+    const rawCode = typeof req.body?.inviteCode === 'string' ? req.body.inviteCode.trim() : '';
+    if (!rawCode) return res.status(400).json({ error: 'Invite code is required' });
 
-    const code = inviteCode.trim().toUpperCase();
+    await client.query('BEGIN');
+    inTx = true;
 
-    // Prevent user from redeeming their own invite code
-    const ownPrefix = `EQUB-${userId.slice(0, 4).toUpperCase()}`;
-    if (code === ownPrefix) {
-      return res.status(400).json({ error: 'You cannot use your own invite code.' });
-    }
+    const result = await applyInviteCodeTx(client, { userId, rawCode });
 
-    // Validate invite code format & verify issuing referrer or platform promo
-    const validPromoCodes = ['WELCOME25', 'FASTDERASH'];
-    let isValidCode = validPromoCodes.includes(code);
-
-    if (!isValidCode) {
-      const match = code.match(/^EQUB-([A-F0-9]{4})$/i);
-      if (match) {
-        const prefix = match[1].toLowerCase();
-        const referrerRes = await db.query(
-          `SELECT id FROM users WHERE id::text LIKE $1 AND id != $2 LIMIT 1`,
-          [`${prefix}%`, userId]
-        );
-        if (referrerRes.rows.length > 0) {
-          isValidCode = true;
-        }
-      }
-    }
-
-    if (!isValidCode) {
-      return res.status(400).json({ error: 'Invalid invite code. Please enter a valid referral code (e.g. EQUB-A1B2).' });
-    }
-
-    // Check if user has already redeemed an invite code
-    const alreadyRedeemed = await db.query('SELECT 1 FROM user_invites WHERE user_id = $1', [userId]);
-    if (alreadyRedeemed.rows.length > 0) {
-      return res.status(400).json({ error: 'You have already redeemed an invite code.' });
-    }
-
-    const bonus = 25.00;
-
-    // Insert FIRST: unique constraint on user_id ensures strict atomicity
-    try {
-      await db.query('INSERT INTO user_invites (user_id, invite_code, bonus_amount) VALUES ($1, $2, $3)', [userId, code, bonus]);
-    } catch (err) {
-      if (err.code === '23505') {
-        return res.status(400).json({ error: 'You have already redeemed an invite code.' });
-      }
-      throw err;
-    }
-
-    // Credit bonus to wallet
-    const newBalance = await walletLedger.deposit(userId, bonus, 'real');
+    await client.query('COMMIT');
+    inTx = false;
 
     res.json({
       success: true,
-      message: `Invite code applied! ${bonus} ETB welcome bonus has been credited to your wallet.`,
-      bonus,
-      newBalance
+      message: `Invite code applied! ${result.bonus} ETB welcome bonus has been credited to your wallet.`,
+      bonus: result.bonus,
+      senderReward: result.senderReward,
+      newBalance: result.newBalance
     });
   } catch (err) {
-    res.status(400).json({ error: err.message || 'Failed to apply invite code' });
+    if (inTx) await client.query('ROLLBACK').catch(() => {});
+    res.status(err.status || 400).json({ error: err.message || 'Failed to apply invite code' });
+  } finally {
+    client.release();
   }
 });
 
