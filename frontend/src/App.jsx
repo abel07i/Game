@@ -3,6 +3,21 @@ import { getSocket } from './socketManager';
 import { API_URL } from './config';
 import PasswordResetModal from './components/PasswordResetModal';
 
+const INVITE_CODE_RE = /^[A-Z0-9_-]{3,32}$/;
+
+const sanitizeInviteCode = (raw) => {
+    if (typeof raw !== 'string') return '';
+    const normalized = raw.trim().toUpperCase();
+    return INVITE_CODE_RE.test(normalized) ? normalized : '';
+};
+
+const getSafeStoredInviteCode = () => {
+    const raw = localStorage.getItem('fastderash_ref') || '';
+    const cleaned = sanitizeInviteCode(raw);
+    if (!cleaned && raw) localStorage.removeItem('fastderash_ref');
+    return cleaned;
+};
+
 let audioCtx = null;
 const initAudio = () => {
     try {
@@ -385,7 +400,7 @@ export default function App() {
     const [walletModal, setWalletModal] = useState({ open: false, action: null, amount: '', transactionId: '', loading: false });
     const [walletTabState, setWalletTabState] = useState({ active: 'deposit', amount: '', transactionId: '', phone: '', loading: false });
     const [myWithdrawals, setMyWithdrawals] = useState([]);
-    const [inviteCodeInput, setInviteCodeInput] = useState(() => (localStorage.getItem('fastderash_ref') || '').toUpperCase());
+    const [inviteCodeInput, setInviteCodeInput] = useState(() => getSafeStoredInviteCode());
     const [appliedInvite, setAppliedInvite] = useState(false);
     const [inviteLoading, setInviteLoading] = useState(false);
     const [inviteMessage, setInviteMessage] = useState(null);
@@ -1333,7 +1348,7 @@ export default function App() {
                             localStorage.removeItem('fastderash_ref');
                         } else {
                             setAppliedInvite(false);
-                            const savedRef = (localStorage.getItem('fastderash_ref') || '').trim().toUpperCase();
+                            const savedRef = getSafeStoredInviteCode();
                             if (savedRef) setInviteCodeInput(savedRef);
                         }
                     }
@@ -1343,15 +1358,18 @@ export default function App() {
             setInviteStats({ ownInviteCode: '', totalInvites: 0, referralEarnings: 0 });
             setAppliedInvite(false);
             setInviteMessage(null);
-            setInviteCodeInput((localStorage.getItem('fastderash_ref') || '').toUpperCase());
+            setInviteCodeInput(getSafeStoredInviteCode());
         }
     }, [user?.id, mode]);
 
     useEffect(() => {
         const params = new URLSearchParams(window.location.search);
-        const rawRef = params.get('ref') || params.get('invite');
-        if (rawRef && rawRef.trim()) {
-            const cleaned = rawRef.trim().toUpperCase();
+        const hasRefParam = params.has('ref') || params.has('invite');
+        if (!hasRefParam) return;
+
+        const rawRef = params.get('ref') || params.get('invite') || '';
+        const cleaned = sanitizeInviteCode(rawRef);
+        if (cleaned) {
             localStorage.setItem('fastderash_ref', cleaned);
             setFormData(prev => ({ ...prev, inviteCode: cleaned }));
             setInviteCodeInput(cleaned);
@@ -1360,12 +1378,14 @@ export default function App() {
                 setIsForgotPassword(false);
                 setActiveTab('home');
             }
-            params.delete('ref');
-            params.delete('invite');
-            const qs = params.toString();
-            const nextUrl = window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash;
-            window.history.replaceState({}, '', nextUrl);
         }
+
+        params.delete('ref');
+        params.delete('invite');
+        const qs = params.toString();
+        const safePath = window.location.pathname.replace(/^\/+/, '/');
+        const nextUrl = safePath + (qs ? `?${qs}` : '') + window.location.hash;
+        window.history.replaceState({}, '', nextUrl);
     }, []);
 
     useEffect(() => {
@@ -1578,7 +1598,7 @@ export default function App() {
         password: '',
         displayName: '',
         confirmPassword: '',
-        inviteCode: (localStorage.getItem('fastderash_ref') || '').toUpperCase()
+        inviteCode: getSafeStoredInviteCode()
     }));
     const [isForgotPassword, setIsForgotPassword] = useState(false);
 

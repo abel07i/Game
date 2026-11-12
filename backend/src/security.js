@@ -67,6 +67,104 @@ function securityHeaders(req, res, next) {
   next();
 }
 
+const FORBIDDEN_REWRITE_HEADERS = [
+  'x-original-url',
+  'x-rewrite-url',
+  'x-http-method-override',
+  'x-method-override',
+  'x-http-method'
+];
+
+const HOST_HEADER_RE = /^(?:\[[a-fA-F0-9:]+\]|[a-zA-Z0-9.-]+)(?::\d{1,5})?$/;
+const MAX_URL_LENGTH = 2048;
+
+function isValidHostValue(hostValue) {
+  if (typeof hostValue !== 'string') return false;
+  const trimmed = hostValue.trim();
+  if (!trimmed || trimmed.length > 255) return false;
+  if (!HOST_HEADER_RE.test(trimmed)) return false;
+
+  if (process.env.ALLOWED_HOSTS) {
+    const allowed = new Set(
+      process.env.ALLOWED_HOSTS.split(',').map(h => h.trim().toLowerCase()).filter(Boolean)
+    );
+    const hostOnly = trimmed.toLowerCase().replace(/:\d+$/, '');
+    if (!allowed.has(trimmed.toLowerCase()) && !allowed.has(hostOnly)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasPollutedQueryParams(query) {
+  if (!query || typeof query !== 'object') return false;
+  for (const val of Object.values(query)) {
+    if (Array.isArray(val) || (val !== null && typeof val === 'object')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Protects routes against URL manipulation, proxy URL rewriting,
+ * method override smuggling, host header injection, path traversal, and HPP.
+ */
+function urlIntegrityGuard(req, res, next) {
+  for (const headerName of FORBIDDEN_REWRITE_HEADERS) {
+    if (req.headers[headerName] !== undefined) {
+      return res.status(403).json({ error: 'Forbidden request override header' });
+    }
+  }
+
+  if (req.headers.host !== undefined && !isValidHostValue(req.headers.host)) {
+    return res.status(400).json({ error: 'Invalid Host header' });
+  }
+  if (req.headers['x-forwarded-host'] !== undefined && !isValidHostValue(req.headers['x-forwarded-host'])) {
+    return res.status(400).json({ error: 'Invalid X-Forwarded-Host header' });
+  }
+
+  const rawUrl = req.originalUrl || req.url || '';
+  if (rawUrl.length > MAX_URL_LENGTH) {
+    return res.status(400).json({ error: 'URL exceeds maximum allowed length' });
+  }
+  if (/[\x00-\x1f\x7f\\]/.test(rawUrl)) {
+    return res.status(400).json({ error: 'Malformed characters in URL' });
+  }
+
+  const qIndex = rawUrl.indexOf('?');
+  const rawPath = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
+  const rawQuery = qIndex === -1 ? '' : rawUrl.slice(qIndex + 1);
+
+  if (/%00|%5c/i.test(rawUrl)) {
+    return res.status(400).json({ error: 'Forbidden encoded sequence in URL' });
+  }
+  if (/%25[0-9a-f]{2}/i.test(rawPath)) {
+    return res.status(400).json({ error: 'Double-encoded URL path is not allowed' });
+  }
+  if (/(?:^|\/)(?:\.{1,2}|%2e%2e|%2e)(?:\/|$)/i.test(rawPath) || /(?:^|\/)(?:\.|%2e)[^/]+/i.test(rawPath)) {
+    return res.status(400).json({ error: 'Invalid or hidden URL path segment' });
+  }
+  if (rawQuery && /\.\.|%2e%2e/i.test(rawQuery)) {
+    return res.status(400).json({ error: 'Invalid path traversal sequence in query' });
+  }
+
+  try {
+    const decodedPath = decodeURIComponent(rawPath);
+    if (/[\x00-\x1f\x7f\\]/.test(decodedPath) || /(?:^|\/)\.{1,2}(?:\/|$)|(?:^|\/)\.[^/]/.test(decodedPath)) {
+      return res.status(400).json({ error: 'Invalid decoded URL path' });
+    }
+  } catch {
+    return res.status(400).json({ error: 'Malformed percent-encoding in URL' });
+  }
+
+  if (hasPollutedQueryParams(req.query)) {
+    return res.status(400).json({ error: 'Duplicate or nested query parameters are not allowed' });
+  }
+
+  next();
+}
+
 /**
  * Validates that a Telebirr receipt from verify.et actually credits the platform's account.
  * Handles Ethio telecom masked phone numbers (e.g. 2519****6463 -> trailing 4 digits 6463).
@@ -149,5 +247,6 @@ module.exports = {
   isValidUuid,
   createRateLimiter,
   securityHeaders,
+  urlIntegrityGuard,
   verifyTelebirrReceiver
 };

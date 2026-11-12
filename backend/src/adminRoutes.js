@@ -47,8 +47,17 @@ const ALLOWED_TX_STATUSES = new Set(['pending', 'completed', 'failed', 'reversed
 const ALLOWED_WITHDRAWAL_STATUSES = new Set(['pending', 'approved', 'rejected', 'cancelled']);
 const ALLOWED_ROOM_STATUSES = new Set(['open', 'drawing', 'settled', 'refunded', 'cancelled']);
 const ALLOWED_TIERS = new Set(['starter', 'bronze', 'silver', 'gold']);
+const ALLOWED_CHART_PERIODS = { '7d': 7, '30d': 30, '90d': 90 };
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_BULK_ITEMS = 100;
+
+// Reject any tampered non-UUID :id route parameter uniformly before hitting DB queries
+router.param('id', (req, res, next, id) => {
+  if (!isValidUuid(id)) {
+    return res.status(400).json({ error: 'Invalid resource ID format' });
+  }
+  next();
+});
 
 function validateDateRange(dateFrom, dateTo) {
   if (dateFrom && !ISO_DATE_RE.test(String(dateFrom))) {
@@ -1322,8 +1331,11 @@ router.get('/profit/summary', adminMiddleware, adminReadLimiter, async (req, res
 
 router.get('/profit/chart', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
-    const { period = '30d' } = req.query;
-    const days = period === '7d' ? 7 : period === '90d' ? 90 : 30;
+    const rawPeriod = req.query.period === undefined ? '30d' : String(req.query.period).trim().toLowerCase();
+    const days = ALLOWED_CHART_PERIODS[rawPeriod];
+    if (!days) {
+      return res.status(400).json({ error: 'Invalid chart period' });
+    }
     const result = await db.query(`
       SELECT
         DATE_TRUNC('day', collected_at)::DATE AS date,

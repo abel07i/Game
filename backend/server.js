@@ -11,7 +11,7 @@ const walletLedger = require('./src/walletLedger');
 const roomManager = require('./src/roomManager');
 const adminRoutes = require('./src/adminRoutes');
 const { generateToken, verifyToken, hashPassword, verifyPassword } = require('./src/adminAuth');
-const { isValidUuid, createRateLimiter, securityHeaders, verifyTelebirrReceiver } = require('./src/security');
+const { isValidUuid, createRateLimiter, securityHeaders, urlIntegrityGuard, verifyTelebirrReceiver } = require('./src/security');
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
@@ -32,6 +32,7 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: corsOrigin } });
 
 app.use(securityHeaders);
+app.use(urlIntegrityGuard);
 app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: '100kb' }));
 
@@ -76,11 +77,16 @@ app.get('/api/v1/health', async (req, res) => {
 // ── Admin API Routes ──────────────────────────────────────────────────────────
 app.use('/api/v1/admin', adminRoutes);
 
+const RESERVED_PREFIX_RE = /^\/(api|socket\.io|admin)(?:\/|$)/i;
+
 // Serve built admin panel at /admin (production)
 const adminDistPath = path.join(__dirname, '../admin/dist');
 if (fs.existsSync(adminDistPath)) {
-  app.use('/admin', express.static(adminDistPath));
+  app.use('/admin', express.static(adminDistPath, { dotfiles: 'deny', fallthrough: true }));
   app.get(['/admin', '/admin/*'], (req, res) => {
+    if (path.extname(req.path)) {
+      return res.status(404).type('text/plain').send('Not found');
+    }
     res.sendFile(path.join(adminDistPath, 'index.html'));
   });
 }
@@ -88,9 +94,12 @@ if (fs.existsSync(adminDistPath)) {
 // Serve built frontend (production)
 const distPath = path.join(__dirname, '../frontend/dist');
 if (fs.existsSync(distPath)) {
-  app.use(express.static(distPath));
+  app.use(express.static(distPath, { dotfiles: 'deny', fallthrough: true }));
   app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api') || req.path.startsWith('/socket.io') || req.path.startsWith('/admin')) return next();
+    if (RESERVED_PREFIX_RE.test(req.path)) return next();
+    if (path.extname(req.path)) {
+      return res.status(404).type('text/plain').send('Not found');
+    }
     res.sendFile(path.join(distPath, 'index.html'));
   });
 }
@@ -1178,10 +1187,22 @@ app.get('/api/v1/wallet/withdraw/config', async (req, res) => {
   }
 });
 
+const ALLOWED_ACCOUNT_MODES = new Set(['real', 'demo']);
+
+function parseAccountMode(rawMode) {
+  if (rawMode === undefined || rawMode === null || rawMode === '') return 'real';
+  if (typeof rawMode !== 'string') return null;
+  const normalized = rawMode.trim().toLowerCase();
+  return ALLOWED_ACCOUNT_MODES.has(normalized) ? normalized : null;
+}
+
 app.get('/api/v1/wallet/transactions', playerMiddleware, async (req, res) => {
   try {
     const userId = req.playerId;
-    const { mode = 'real' } = req.query;
+    const mode = parseAccountMode(req.query.mode);
+    if (!mode) {
+      return res.status(400).json({ error: 'Invalid account mode' });
+    }
 
     // Fetch transactions from the ledger view
     const result = await db.query(`
@@ -1208,6 +1229,9 @@ app.get('/api/v1/rooms', (req, res) => {
 
 // Single room details endpoint (useful for joining newly opened cycle)
 app.get('/api/v1/rooms/:id', (req, res) => {
+  if (!isValidUuid(req.params.id)) {
+    return res.status(400).json({ error: 'Invalid room ID' });
+  }
   const room = roomManager.rooms.get(req.params.id);
   if (!room) return res.status(404).json({ error: 'Game room not found' });
   res.json({
@@ -1336,7 +1360,10 @@ app.post('/api/v1/rooms/join', playerMiddleware, async (req, res) => {
 app.get('/api/v1/history/my-tickets', playerMiddleware, async (req, res) => {
   try {
     const userId = req.playerId;
-    const { mode = 'real' } = req.query;
+    const mode = parseAccountMode(req.query.mode);
+    if (!mode) {
+      return res.status(400).json({ error: 'Invalid account mode' });
+    }
     const result = await db.query(`
       SELECT
         t.id, r.room_number, r.tier, r.target_jackpot,
@@ -1404,6 +1431,13 @@ server.on('error', (err) => {
     console.error('❌ Server error:', err);
     process.exit(1);
   }
+});
+
+app.use((req, res, next) => {
+  if (/^\/api(?:\/|$)/i.test(req.path)) {
+    return res.status(404).json({ error: 'API endpoint not found' });
+  }
+  next();
 });
 
 server.listen(PORT, async () => {
