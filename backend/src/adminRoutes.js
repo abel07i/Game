@@ -18,6 +18,13 @@ const txMutationLimiter = createRateLimiter({
   message: 'Too many transaction modification attempts. Please wait 15 minutes.'
 });
 
+const withdrawalMutationLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  keyGenerator: (req) => `${req.ip}:${req.admin?.id || 'anon'}:wdr`,
+  message: 'Too many withdrawal modification attempts. Please wait 15 minutes.'
+});
+
 const adminReadLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   max: 120,
@@ -30,8 +37,23 @@ const ALLOWED_TX_TYPES = new Set([
   'platform_tax', 'refund', 'demo_credit', 'adjustment'
 ]);
 const ALLOWED_TX_STATUSES = new Set(['pending', 'completed', 'failed', 'reversed']);
+const ALLOWED_WITHDRAWAL_STATUSES = new Set(['pending', 'approved', 'rejected', 'cancelled']);
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const MAX_TX_BULK_DELETE = 100;
+const MAX_BULK_ITEMS = 100;
+
+function validateUuidArray(ids, label = 'IDs') {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return { ok: false, error: `Please provide an array of ${label}.` };
+  }
+  const uniqueIds = [...new Set(ids)];
+  if (uniqueIds.length > MAX_BULK_ITEMS) {
+    return { ok: false, error: `Bulk action is capped at ${MAX_BULK_ITEMS} records per request.` };
+  }
+  if (!uniqueIds.every(isValidUuid)) {
+    return { ok: false, error: `All ${label} must be valid UUIDs.` };
+  }
+  return { ok: true, uniqueIds };
+}
 
 async function verifyAdminActionPassword(adminId, confirmPassword) {
   if (typeof confirmPassword !== 'string' || confirmPassword.length === 0) {
@@ -51,6 +73,17 @@ async function verifyAdminActionPassword(adminId, confirmPassword) {
   return { ok: true, adminName: res.rows[0].display_name || null };
 }
 
+async function recordAdminAudit(client, { adminId, adminUsername, action, targetType, targetIds, snapshot, req }) {
+  const ip = String(req.ip || '').slice(0, 64) || null;
+  const ua = String(req.headers['user-agent'] || '').slice(0, 500) || null;
+  await client.query(
+    `INSERT INTO admin_audit_logs
+       (admin_id, admin_username, action, target_type, target_ids, snapshot, ip_address, user_agent)
+     VALUES ($1, $2, $3, $4, $5::text[], $6::jsonb, $7, $8)`,
+    [adminId, adminUsername, action, targetType, targetIds, JSON.stringify(snapshot), ip, ua]
+  );
+}
+
 async function deleteTransactionsWithAudit({ client, ids, action, adminId, adminUsername, req }) {
   const locked = await client.query(
     `SELECT t.id, t.wallet_id, t.tx_type, t.amount, t.direction, t.status,
@@ -66,15 +99,15 @@ async function deleteTransactionsWithAudit({ client, ids, action, adminId, admin
   }
 
   const targetIds = locked.rows.map(r => r.id);
-  const ip = String(req.ip || '').slice(0, 64) || null;
-  const ua = String(req.headers['user-agent'] || '').slice(0, 500) || null;
-
-  await client.query(
-    `INSERT INTO admin_audit_logs
-       (admin_id, admin_username, action, target_type, target_ids, snapshot, ip_address, user_agent)
-     VALUES ($1, $2, $3, 'transaction', $4::text[], $5::jsonb, $6, $7)`,
-    [adminId, adminUsername, action, targetIds, JSON.stringify(locked.rows), ip, ua]
-  );
+  await recordAdminAudit(client, {
+    adminId,
+    adminUsername,
+    action,
+    targetType: 'transaction',
+    targetIds,
+    snapshot: locked.rows,
+    req
+  });
 
   await client.query("SET LOCAL app.allow_tx_delete = 'true'");
   const delRes = await client.query(
@@ -82,6 +115,105 @@ async function deleteTransactionsWithAudit({ client, ids, action, adminId, admin
     [targetIds]
   );
   return delRes.rows.map(r => r.id);
+}
+
+async function applyWithdrawalDecisions({ client, items, status, adminId, adminUsername, action, trimmedNotes, req }) {
+  for (const reqItem of items) {
+    if (status === 'rejected') {
+      const refundAmount = parseFloat(reqItem.amount);
+      if (!Number.isFinite(refundAmount) || refundAmount <= 0) {
+        throw new Error('Invalid withdrawal refund amount');
+      }
+      const refundNote = trimmedNotes ? `Withdrawal rejected: ${trimmedNotes}` : 'Withdrawal rejected/refunded by Admin';
+      const refundRes = await client.query(
+        `SELECT * FROM fn_wallet_refund($1, $2, 'real', $3)`,
+        [reqItem.user_id, refundAmount, refundNote]
+      );
+      if (!refundRes.rows[0]?.success) {
+        throw new Error('Failed to refund user balance');
+      }
+    } else if (status === 'approved' && reqItem.transaction_id) {
+      const payoutNote = trimmedNotes ? `Withdrawal paid via Telebirr (${trimmedNotes})` : 'Withdrawal paid via Telebirr';
+      await client.query(
+        `UPDATE transactions SET reference_note = $1, status = 'completed' WHERE id = $2`,
+        [payoutNote, reqItem.transaction_id]
+      );
+    }
+  }
+
+  const processedIds = items.map(r => r.id);
+  const snapshot = items.map(r => ({ ...r, decision: status, decision_notes: trimmedNotes || null }));
+  await recordAdminAudit(client, {
+    adminId,
+    adminUsername,
+    action,
+    targetType: 'withdrawal',
+    targetIds: processedIds,
+    snapshot,
+    req
+  });
+
+  await client.query(
+    `UPDATE withdrawal_requests
+     SET status = $1, admin_id = $2, notes = $3, updated_at = NOW()
+     WHERE id = ANY($4::uuid[])`,
+    [status, adminId, trimmedNotes || null, processedIds]
+  );
+  return processedIds;
+}
+
+async function deleteWithdrawalsWithAudit({ client, ids, refundPending, adminId, adminUsername, action, req }) {
+  const locked = await client.query(
+    `SELECT * FROM withdrawal_requests WHERE id = ANY($1::uuid[]) FOR UPDATE`,
+    [ids]
+  );
+  if (locked.rows.length === 0) {
+    return { ok: false, status: 404, error: 'Withdrawal request not found' };
+  }
+
+  const pendingList = locked.rows.filter(r => r.status === 'pending');
+  if (pendingList.length > 0 && !refundPending) {
+    return {
+      ok: false,
+      status: 400,
+      error: pendingList.length === 1 && ids.length === 1
+        ? 'This withdrawal request is currently PENDING. Deleting it would leave the user without their funds. To automatically refund the player before deleting, confirm with refundPending=true, or reject it first.'
+        : `Selected items contain ${pendingList.length} PENDING request(s). Please confirm refunding them prior to deletion (set refundPending: true).`
+    };
+  }
+
+  let refundedCount = 0;
+  for (const reqItem of pendingList) {
+    const refundAmount = parseFloat(reqItem.amount);
+    if (!Number.isFinite(refundAmount) || refundAmount <= 0) {
+      throw new Error('Invalid withdrawal refund amount');
+    }
+    const refundRes = await client.query(
+      `SELECT * FROM fn_wallet_refund($1, $2, 'real', $3)`,
+      [reqItem.user_id, refundAmount, `Withdrawal #${reqItem.id.slice(0, 8)} deleted & refunded by Admin`]
+    );
+    if (!refundRes.rows[0]?.success) {
+      throw new Error('Failed to refund user balance before deletion');
+    }
+    refundedCount++;
+  }
+
+  const targetIds = locked.rows.map(r => r.id);
+  await recordAdminAudit(client, {
+    adminId,
+    adminUsername,
+    action,
+    targetType: 'withdrawal',
+    targetIds,
+    snapshot: locked.rows.map(r => ({ ...r, refunded_on_delete: r.status === 'pending' && Boolean(refundPending) })),
+    req
+  });
+
+  const delRes = await client.query(
+    `DELETE FROM withdrawal_requests WHERE id = ANY($1::uuid[]) RETURNING id`,
+    [targetIds]
+  );
+  return { ok: true, deletedIds: delRes.rows.map(r => r.id), refundedCount };
 }
 
 router.param('id', (req, res, next, id) => {
@@ -895,17 +1027,11 @@ router.post('/transactions/bulk-delete', adminMiddleware, txMutationLimiter, asy
   try {
     const { ids, confirmPassword } = req.body || {};
 
-    if (!Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({ error: 'Please provide an array of transaction IDs to delete.' });
+    const idCheck = validateUuidArray(ids, 'transaction IDs');
+    if (!idCheck.ok) {
+      return res.status(400).json({ error: idCheck.error });
     }
-
-    const uniqueIds = [...new Set(ids)];
-    if (uniqueIds.length > MAX_TX_BULK_DELETE) {
-      return res.status(400).json({ error: `Bulk delete is capped at ${MAX_TX_BULK_DELETE} records per request.` });
-    }
-    if (!uniqueIds.every(isValidUuid)) {
-      return res.status(400).json({ error: 'All transaction IDs must be valid UUIDs.' });
-    }
+    const uniqueIds = idCheck.uniqueIds;
 
     const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
     if (!pwCheck.ok) {
@@ -1316,9 +1442,17 @@ router.delete('/admins/:id', adminMiddleware, async (req, res) => {
 
 // ── Withdrawals ──────────────────────────────────────────────────────────────
 
-router.get('/withdrawals', adminMiddleware, async (req, res) => {
+router.get('/withdrawals', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
-    const { status, search } = req.query;
+    const { status, search, limit = 200 } = req.query;
+
+    if (status && status !== 'all' && !ALLOWED_WITHDRAWAL_STATUSES.has(String(status))) {
+      return res.status(400).json({ error: 'Invalid withdrawal status filter' });
+    }
+
+    const safeLimit = Math.min(200, Math.max(1, parseInt(limit, 10) || 200));
+    const cleanSearch = typeof search === 'string' ? search.trim().slice(0, 100) : '';
+
     let query = `
       SELECT 
         w.*, 
@@ -1335,12 +1469,12 @@ router.get('/withdrawals', adminMiddleware, async (req, res) => {
     const conditions = [];
 
     if (status && status !== 'all') {
-      params.push(status);
+      params.push(String(status));
       conditions.push(`w.status = $${params.length}`);
     }
 
-    if (search && search.trim()) {
-      params.push(`%${search.trim()}%`);
+    if (cleanSearch) {
+      params.push(`%${cleanSearch}%`);
       conditions.push(`(u.display_name ILIKE $${params.length} OR w.phone_number ILIKE $${params.length} OR w.notes ILIKE $${params.length} OR CAST(w.id AS TEXT) ILIKE $${params.length})`);
     }
 
@@ -1348,7 +1482,8 @@ router.get('/withdrawals', adminMiddleware, async (req, res) => {
       query += ` WHERE ` + conditions.join(' AND ');
     }
 
-    query += ` ORDER BY w.created_at DESC`;
+    params.push(safeLimit);
+    query += ` ORDER BY w.created_at DESC LIMIT $${params.length}`;
 
     const result = await db.query(query, params);
     res.json(result.rows);
@@ -1358,16 +1493,38 @@ router.get('/withdrawals', adminMiddleware, async (req, res) => {
   }
 });
 
-// Single update (Approve / Reject) with concurrency protection & transaction
-router.put('/withdrawals/:id', adminMiddleware, async (req, res) => {
+// Forensic Security Audit Log for Withdrawal Operations
+router.get('/withdrawals/audit-logs', adminMiddleware, adminReadLimiter, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, admin_id, admin_username, action, target_type, target_ids,
+              snapshot, ip_address, created_at
+       FROM admin_audit_logs
+       WHERE target_type = 'withdrawal'
+       ORDER BY created_at DESC
+       LIMIT 50`
+    );
+    res.json({ logs: result.rows });
+  } catch (err) {
+    console.error('Withdrawal audit log error:', err);
+    res.status(500).json({ error: 'Failed to fetch withdrawal security audit logs' });
+  }
+});
+
+// Single update (Approve / Reject) with password confirmation, concurrency protection & audit log
+router.put('/withdrawals/:id', adminMiddleware, withdrawalMutationLimiter, async (req, res) => {
   const client = await db.getClient();
   try {
     const { id } = req.params;
-    const { status, notes = '' } = req.body;
-    const adminId = req.admin ? req.admin.id : null;
+    const { status, notes = '', confirmPassword } = req.body || {};
 
     if (!['approved', 'rejected'].includes(status)) {
       return res.status(400).json({ error: 'Invalid status. Must be approved or rejected.' });
+    }
+
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
     }
 
     await client.query('BEGIN');
@@ -1388,196 +1545,143 @@ router.put('/withdrawals/:id', adminMiddleware, async (req, res) => {
       return res.status(400).json({ error: `Request already processed (Status: ${request.status})` });
     }
 
-    // Verify admin ID if present to satisfy foreign key constraint
-    let validAdminId = null;
-    if (adminId) {
-      const adminCheck = await client.query(`SELECT id FROM users WHERE id = $1`, [adminId]);
-      if (adminCheck.rows.length > 0) validAdminId = adminCheck.rows[0].id;
-    }
-
-    const trimmedNotes = notes ? notes.trim() : '';
-
-    if (status === 'rejected') {
-      const refundAmount = parseFloat(request.amount);
-      const refundNote = trimmedNotes ? `Withdrawal rejected: ${trimmedNotes}` : 'Withdrawal rejected/refunded by Admin';
-
-      // Atomic refund via stored procedure
-      const refundRes = await client.query(
-        `SELECT * FROM fn_wallet_refund($1, $2, 'real', $3)`,
-        [request.user_id, refundAmount, refundNote]
-      );
-
-      if (!refundRes.rows[0]?.success) {
-        await client.query('ROLLBACK');
-        return res.status(500).json({ error: 'Failed to refund user balance' });
-      }
-    } else if (status === 'approved') {
-      // Update linked transaction note if available
-      const payoutNote = trimmedNotes ? `Withdrawal paid via Telebirr (${trimmedNotes})` : `Withdrawal paid via Telebirr`;
-      if (request.transaction_id) {
-        await client.query(
-          `UPDATE transactions SET reference_note = $1, status = 'completed' WHERE id = $2`,
-          [payoutNote, request.transaction_id]
-        );
-      }
-    }
-
-    await client.query(
-      `UPDATE withdrawal_requests SET status = $1, admin_id = $2, notes = $3, updated_at = NOW() WHERE id = $4`,
-      [status, validAdminId, trimmedNotes || null, id]
-    );
+    const trimmedNotes = typeof notes === 'string' ? notes.trim().slice(0, 500) : '';
+    await applyWithdrawalDecisions({
+      client,
+      items: [request],
+      status,
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      action: status === 'approved' ? 'approve_withdrawal' : 'reject_withdrawal',
+      trimmedNotes,
+      req
+    });
 
     await client.query('COMMIT');
-
     res.json({ success: true, status, id });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('Update withdrawal error:', err);
-    res.status(400).json({ error: err.message || 'Failed to update withdrawal request' });
+    res.status(500).json({ error: 'Failed to update withdrawal request' });
   } finally {
     client.release();
   }
 });
 
-// Single Delete Withdrawal Request
-router.delete('/withdrawals/:id', adminMiddleware, async (req, res) => {
+// Single Delete Withdrawal Request (requires password confirmation + immutable audit log)
+router.delete('/withdrawals/:id', adminMiddleware, withdrawalMutationLimiter, async (req, res) => {
   const client = await db.getClient();
   try {
     const { id } = req.params;
     const refundPending = req.query.refundPending === 'true' || req.body?.refundPending === true;
 
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, req.body?.confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
+    }
+
     await client.query('BEGIN');
+    const delResult = await deleteWithdrawalsWithAudit({
+      client,
+      ids: [id],
+      refundPending,
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      action: 'delete_withdrawal',
+      req
+    });
 
-    const checkRes = await client.query(`SELECT * FROM withdrawal_requests WHERE id = $1 FOR UPDATE`, [id]);
-    if (checkRes.rows.length === 0) {
+    if (!delResult.ok) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Withdrawal request not found' });
-    }
-    const request = checkRes.rows[0];
-
-    // If pending and refund requested, refund first
-    if (request.status === 'pending') {
-      if (!refundPending) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({
-          error: 'This withdrawal request is currently PENDING. Deleting it would leave the user without their funds. To automatically refund the player before deleting, confirm with refundPending=true, or reject it first.'
-        });
-      }
-
-      const refundAmount = parseFloat(request.amount);
-      await client.query(
-        `SELECT * FROM fn_wallet_refund($1, $2, 'real', $3)`,
-        [request.user_id, refundAmount, `Withdrawal #${id.slice(0, 8)} deleted & refunded by Admin`]
-      );
+      return res.status(delResult.status).json({ error: delResult.error });
     }
 
-    await client.query(`DELETE FROM withdrawal_requests WHERE id = $1`, [id]);
     await client.query('COMMIT');
-
-    res.json({ success: true, message: 'Withdrawal request deleted successfully', id });
+    res.json({ success: true, message: 'Withdrawal request deleted and logged', id: delResult.deletedIds[0] });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('Delete withdrawal error:', err);
-    res.status(500).json({ error: err.message || 'Failed to delete withdrawal request' });
+    res.status(500).json({ error: 'Failed to delete withdrawal request' });
   } finally {
     client.release();
   }
 });
 
-// Bulk Delete Withdrawal Requests
-router.post('/withdrawals/bulk-delete', adminMiddleware, async (req, res) => {
+// Bulk Delete Withdrawal Requests (requires password confirmation + bounded batch + immutable audit log)
+router.post('/withdrawals/bulk-delete', adminMiddleware, withdrawalMutationLimiter, async (req, res) => {
   const client = await db.getClient();
   try {
-    const { ids, refundPending = false } = req.body;
+    const { ids, refundPending = false, confirmPassword } = req.body || {};
 
-    if (!Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({ error: 'Please provide an array of withdrawal request IDs to delete.' });
+    const idCheck = validateUuidArray(ids, 'withdrawal request IDs');
+    if (!idCheck.ok) {
+      return res.status(400).json({ error: idCheck.error });
+    }
+
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
     }
 
     await client.query('BEGIN');
+    const delResult = await deleteWithdrawalsWithAudit({
+      client,
+      ids: idCheck.uniqueIds,
+      refundPending,
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      action: 'bulk_delete_withdrawals',
+      req
+    });
 
-    // Fetch all requests to delete with row lock
-    const fetchRes = await client.query(
-      `SELECT * FROM withdrawal_requests WHERE id = ANY($1::uuid[]) FOR UPDATE`,
-      [ids]
-    );
-
-    if (fetchRes.rows.length === 0) {
+    if (!delResult.ok) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'No matching withdrawal requests found.' });
+      return res.status(delResult.status).json({ error: delResult.error });
     }
-
-    let refundedCount = 0;
-    const pendingList = fetchRes.rows.filter(r => r.status === 'pending');
-
-    if (pendingList.length > 0 && !refundPending) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({
-        error: `Selected items contain ${pendingList.length} PENDING request(s). Please confirm refunding them prior to deletion (set refundPending: true).`
-      });
-    }
-
-    // Refund any pending requests if requested
-    for (const reqItem of pendingList) {
-      const refundAmount = parseFloat(reqItem.amount);
-      await client.query(
-        `SELECT * FROM fn_wallet_refund($1, $2, 'real', $3)`,
-        [reqItem.user_id, refundAmount, `Withdrawal #${reqItem.id.slice(0, 8)} deleted & refunded by Admin`]
-      );
-      refundedCount++;
-    }
-
-    // Execute bulk deletion
-    const delRes = await client.query(
-      `DELETE FROM withdrawal_requests WHERE id = ANY($1::uuid[]) RETURNING id`,
-      [ids]
-    );
 
     await client.query('COMMIT');
 
     res.json({
       success: true,
-      deletedCount: delRes.rowCount,
-      refundedCount,
-      deletedIds: delRes.rows.map(r => r.id)
+      deletedCount: delResult.deletedIds.length,
+      refundedCount: delResult.refundedCount,
+      deletedIds: delResult.deletedIds
     });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('Bulk delete withdrawals error:', err);
-    res.status(500).json({ error: err.message || 'Failed to perform bulk delete.' });
+    res.status(500).json({ error: 'Failed to perform bulk delete' });
   } finally {
     client.release();
   }
 });
 
-// Bulk Update / Batch Process (Approve / Reject multiple)
-router.post('/withdrawals/bulk-update', adminMiddleware, async (req, res) => {
+// Bulk Update / Batch Process (requires password confirmation + bounded batch + immutable audit log)
+router.post('/withdrawals/bulk-update', adminMiddleware, withdrawalMutationLimiter, async (req, res) => {
   const client = await db.getClient();
   try {
-    const { ids, status, notes = '' } = req.body;
-    const adminId = req.admin ? req.admin.id : null;
+    const { ids, status, notes = '', confirmPassword } = req.body || {};
 
-    if (!Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({ error: 'Please provide an array of withdrawal request IDs.' });
+    const idCheck = validateUuidArray(ids, 'withdrawal request IDs');
+    if (!idCheck.ok) {
+      return res.status(400).json({ error: idCheck.error });
     }
 
     if (!['approved', 'rejected'].includes(status)) {
       return res.status(400).json({ error: 'Status must be approved or rejected.' });
     }
 
-    await client.query('BEGIN');
-
-    // Verify admin ID
-    let validAdminId = null;
-    if (adminId) {
-      const adminCheck = await client.query(`SELECT id FROM users WHERE id = $1`, [adminId]);
-      if (adminCheck.rows.length > 0) validAdminId = adminCheck.rows[0].id;
+    const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
+    if (!pwCheck.ok) {
+      return res.status(pwCheck.status).json({ error: pwCheck.error });
     }
+
+    await client.query('BEGIN');
 
     // Fetch and lock pending requests
     const fetchRes = await client.query(
       `SELECT * FROM withdrawal_requests WHERE id = ANY($1::uuid[]) AND status = 'pending' FOR UPDATE`,
-      [ids]
+      [idCheck.uniqueIds]
     );
 
     if (fetchRes.rows.length === 0) {
@@ -1585,32 +1689,17 @@ router.post('/withdrawals/bulk-update', adminMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'No pending withdrawal requests found among selected IDs.' });
     }
 
-    const trimmedNotes = notes ? notes.trim() : '';
-
-    for (const reqItem of fetchRes.rows) {
-      if (status === 'rejected') {
-        const refundAmount = parseFloat(reqItem.amount);
-        const refundNote = trimmedNotes ? `Withdrawal rejected: ${trimmedNotes}` : 'Withdrawal rejected/refunded by Admin';
-        await client.query(
-          `SELECT * FROM fn_wallet_refund($1, $2, 'real', $3)`,
-          [reqItem.user_id, refundAmount, refundNote]
-        );
-      } else if (status === 'approved' && reqItem.transaction_id) {
-        const payoutNote = trimmedNotes ? `Withdrawal paid via Telebirr (${trimmedNotes})` : `Withdrawal paid via Telebirr`;
-        await client.query(
-          `UPDATE transactions SET reference_note = $1, status = 'completed' WHERE id = $2`,
-          [payoutNote, reqItem.transaction_id]
-        );
-      }
-    }
-
-    const processedIds = fetchRes.rows.map(r => r.id);
-    await client.query(
-      `UPDATE withdrawal_requests 
-       SET status = $1, admin_id = $2, notes = $3, updated_at = NOW() 
-       WHERE id = ANY($4::uuid[])`,
-      [status, validAdminId, trimmedNotes || null, processedIds]
-    );
+    const trimmedNotes = typeof notes === 'string' ? notes.trim().slice(0, 500) : '';
+    const processedIds = await applyWithdrawalDecisions({
+      client,
+      items: fetchRes.rows,
+      status,
+      adminId: req.admin.id,
+      adminUsername: pwCheck.adminName,
+      action: status === 'approved' ? 'bulk_approve_withdrawals' : 'bulk_reject_withdrawals',
+      trimmedNotes,
+      req
+    });
 
     await client.query('COMMIT');
 
@@ -1623,7 +1712,7 @@ router.post('/withdrawals/bulk-update', adminMiddleware, async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('Bulk update withdrawals error:', err);
-    res.status(500).json({ error: err.message || 'Failed to perform bulk update.' });
+    res.status(500).json({ error: 'Failed to perform bulk update' });
   } finally {
     client.release();
   }

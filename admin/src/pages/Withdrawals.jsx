@@ -10,8 +10,59 @@ import {
   Check, 
   RefreshCw, 
   AlertTriangle,
-  Trash2
+  Trash2,
+  ShieldCheck,
+  Lock,
+  Eye,
+  EyeOff,
+  History
 } from "lucide-react";
+
+function AdminPasswordField({ id, value, show, submitting, helperText, onChange, onToggleShow, onEnter }) {
+  return (
+    <div className="mt-4">
+      <label className="form-label text-xs font-medium" htmlFor={id}>
+        Confirm Your Admin Password
+      </label>
+      <div style={{ position: "relative" }}>
+        <input
+          id={id}
+          type={show ? "text" : "password"}
+          className="form-input"
+          style={{ paddingRight: 38 }}
+          placeholder="Enter your admin password"
+          autoComplete="current-password"
+          value={value}
+          disabled={submitting}
+          onChange={e => onChange(e.target.value)}
+          onKeyDown={onEnter ? (e) => { if (e.key === "Enter") { e.preventDefault(); onEnter(); } } : undefined}
+          required
+        />
+        <button
+          type="button"
+          aria-label={show ? "Hide password" : "Show password"}
+          onClick={onToggleShow}
+          style={{
+            position: "absolute",
+            right: 10,
+            top: "50%",
+            transform: "translateY(-50%)",
+            background: "transparent",
+            border: "none",
+            color: "var(--text-muted)",
+            cursor: "pointer",
+            padding: 4
+          }}
+        >
+          {show ? <EyeOff size={16} /> : <Eye size={16} />}
+        </button>
+      </div>
+      {helperText && (
+        <span className="text-muted text-xs mt-1 block">{helperText}</span>
+      )}
+    </div>
+  );
+}
 
 export default function Withdrawals() {
   const [withdrawals, setWithdrawals] = useState([]);
@@ -22,12 +73,20 @@ export default function Withdrawals() {
   // Selection state for bulk actions
   const [selectedIds, setSelectedIds] = useState(new Set());
 
+  // Security Audit Log state
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState(null);
+
   // Single Process Modal state (Approve / Reject)
   const [modal, setModal] = useState({
     open: false,
     request: null,
     action: "approve", // 'approve' | 'reject'
     notes: "",
+    confirmPassword: "",
+    showPassword: false,
     submitting: false,
     error: null
   });
@@ -37,6 +96,8 @@ export default function Withdrawals() {
     open: false,
     request: null,
     refundPending: true,
+    confirmPassword: "",
+    showPassword: false,
     submitting: false,
     error: null
   });
@@ -47,6 +108,8 @@ export default function Withdrawals() {
     action: "delete", // 'delete' | 'approve' | 'reject'
     refundPending: true,
     notes: "",
+    confirmPassword: "",
+    showPassword: false,
     submitting: false,
     error: null
   });
@@ -71,6 +134,25 @@ export default function Withdrawals() {
         showToast("error", err.message || "Failed to load withdrawals");
       })
       .finally(() => setLoading(false));
+  };
+
+  const fetchAuditLogs = async () => {
+    setAuditLoading(true);
+    setAuditError(null);
+    try {
+      const res = await api.getWithdrawalAuditLogs();
+      setAuditLogs(res.logs || []);
+    } catch (err) {
+      setAuditError(err.message || "Failed to load withdrawal security audit logs");
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+
+  const toggleAuditLogs = () => {
+    const next = !auditOpen;
+    setAuditOpen(next);
+    if (next) fetchAuditLogs();
   };
 
   const showToast = (type, message) => {
@@ -110,6 +192,8 @@ export default function Withdrawals() {
       request,
       action,
       notes: action === "approve" ? "Paid via Telebirr" : "Incorrect Telebirr account details",
+      confirmPassword: "",
+      showPassword: false,
       submitting: false,
       error: null
     });
@@ -117,18 +201,32 @@ export default function Withdrawals() {
 
   const closeModal = () => {
     if (modal.submitting) return;
-    setModal({ open: false, request: null, action: "approve", notes: "", submitting: false, error: null });
+    setModal({
+      open: false,
+      request: null,
+      action: "approve",
+      notes: "",
+      confirmPassword: "",
+      showPassword: false,
+      submitting: false,
+      error: null
+    });
   };
 
   const submitProcess = async (e) => {
     e.preventDefault();
     if (!modal.request) return;
+    if (!modal.confirmPassword.trim()) {
+      setModal(prev => ({ ...prev, error: "Please enter your admin password to confirm." }));
+      return;
+    }
 
     setModal(prev => ({ ...prev, submitting: true, error: null }));
     try {
       await api.updateWithdrawal(modal.request.id, {
         status: modal.action === "approve" ? "approved" : "rejected",
-        notes: modal.notes.trim()
+        notes: modal.notes.trim(),
+        confirmPassword: modal.confirmPassword
       });
 
       showToast(
@@ -138,8 +236,18 @@ export default function Withdrawals() {
           : `Withdrawal of ${parseFloat(modal.request.amount).toLocaleString()} ETB rejected and refunded to player's wallet.`
       );
 
-      closeModal();
+      setModal({
+        open: false,
+        request: null,
+        action: "approve",
+        notes: "",
+        confirmPassword: "",
+        showPassword: false,
+        submitting: false,
+        error: null
+      });
       fetchWithdrawals();
+      if (auditOpen) fetchAuditLogs();
     } catch (err) {
       setModal(prev => ({ ...prev, submitting: false, error: err.message || "Failed to process withdrawal" }));
     }
@@ -151,6 +259,8 @@ export default function Withdrawals() {
       open: true,
       request,
       refundPending: true,
+      confirmPassword: "",
+      showPassword: false,
       submitting: false,
       error: null
     });
@@ -158,17 +268,38 @@ export default function Withdrawals() {
 
   const closeDeleteModal = () => {
     if (deleteModal.submitting) return;
-    setDeleteModal({ open: false, request: null, refundPending: true, submitting: false, error: null });
+    setDeleteModal({
+      open: false,
+      request: null,
+      refundPending: true,
+      confirmPassword: "",
+      showPassword: false,
+      submitting: false,
+      error: null
+    });
   };
 
   const submitSingleDelete = async () => {
     if (!deleteModal.request) return;
+    if (!deleteModal.confirmPassword.trim()) {
+      setDeleteModal(prev => ({ ...prev, error: "Please enter your admin password to confirm." }));
+      return;
+    }
     setDeleteModal(prev => ({ ...prev, submitting: true, error: null }));
     try {
-      await api.deleteWithdrawal(deleteModal.request.id, deleteModal.refundPending);
-      showToast("success", "Withdrawal request record deleted successfully.");
-      closeDeleteModal();
+      await api.deleteWithdrawal(deleteModal.request.id, deleteModal.refundPending, deleteModal.confirmPassword);
+      showToast("success", "Withdrawal request deleted and recorded in audit log.");
+      setDeleteModal({
+        open: false,
+        request: null,
+        refundPending: true,
+        confirmPassword: "",
+        showPassword: false,
+        submitting: false,
+        error: null
+      });
       fetchWithdrawals();
+      if (auditOpen) fetchAuditLogs();
     } catch (err) {
       setDeleteModal(prev => ({ ...prev, submitting: false, error: err.message || "Failed to delete request" }));
     }
@@ -181,6 +312,8 @@ export default function Withdrawals() {
       action,
       refundPending: true,
       notes: action === "approve" ? "Bulk approved via Telebirr" : action === "reject" ? "Rejected via bulk admin review" : "",
+      confirmPassword: "",
+      showPassword: false,
       submitting: false,
       error: null
     });
@@ -188,26 +321,50 @@ export default function Withdrawals() {
 
   const closeBulkModal = () => {
     if (bulkModal.submitting) return;
-    setBulkModal({ open: false, action: "delete", refundPending: true, notes: "", submitting: false, error: null });
+    setBulkModal({
+      open: false,
+      action: "delete",
+      refundPending: true,
+      notes: "",
+      confirmPassword: "",
+      showPassword: false,
+      submitting: false,
+      error: null
+    });
   };
 
   const submitBulkAction = async (e) => {
     if (e) e.preventDefault();
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
+    if (!bulkModal.confirmPassword.trim()) {
+      setBulkModal(prev => ({ ...prev, error: "Please enter your admin password to confirm." }));
+      return;
+    }
 
     setBulkModal(prev => ({ ...prev, submitting: true, error: null }));
     try {
       if (bulkModal.action === "delete") {
-        const res = await api.bulkDeleteWithdrawals(ids, bulkModal.refundPending);
+        const res = await api.bulkDeleteWithdrawals(ids, bulkModal.refundPending, bulkModal.confirmPassword);
         showToast("success", `Successfully deleted ${res.deletedCount} request(s)${res.refundedCount ? ` (refunded ${res.refundedCount} pending)` : ''}.`);
       } else {
-        const res = await api.bulkUpdateWithdrawals(ids, bulkModal.action, bulkModal.notes);
+        const mappedStatus = bulkModal.action === "approve" ? "approved" : "rejected";
+        const res = await api.bulkUpdateWithdrawals(ids, mappedStatus, bulkModal.notes, bulkModal.confirmPassword);
         showToast("success", `Successfully ${bulkModal.action === 'approve' ? 'approved' : 'rejected'} ${res.processedCount} request(s).`);
       }
 
-      closeBulkModal();
+      setBulkModal({
+        open: false,
+        action: "delete",
+        refundPending: true,
+        notes: "",
+        confirmPassword: "",
+        showPassword: false,
+        submitting: false,
+        error: null
+      });
       fetchWithdrawals();
+      if (auditOpen) fetchAuditLogs();
     } catch (err) {
       setBulkModal(prev => ({ ...prev, submitting: false, error: err.message || "Bulk operation failed" }));
     }
@@ -282,16 +439,109 @@ export default function Withdrawals() {
       )}
 
       {/* Header */}
-      <div className="flex-between mb-6">
+      <div className="flex-between mb-6" style={{ flexWrap: "wrap", gap: 12 }}>
         <div>
           <h1 className="page-title">Withdrawal Requests</h1>
           <p className="text-muted">Review, approve, and process player payout requests to Telebirr with bulk management tools.</p>
         </div>
-        <button className="btn btn-ghost" onClick={fetchWithdrawals} disabled={loading} title="Refresh requests">
-          <RefreshCw size={16} className={loading ? "spinner" : ""} />
-          <span>Refresh</span>
-        </button>
+        <div className="flex gap-2">
+          <button
+            className={`btn ${auditOpen ? "btn-primary" : "btn-ghost"}`}
+            onClick={toggleAuditLogs}
+            title="Toggle Withdrawal Security Audit Log"
+          >
+            <History size={16} />
+            <span>{auditOpen ? "Hide Audit Log" : "Security Audit Log"}</span>
+          </button>
+          <button className="btn btn-ghost" onClick={fetchWithdrawals} disabled={loading} title="Refresh requests">
+            <RefreshCw size={16} className={loading ? "spinner" : ""} />
+            <span>Refresh</span>
+          </button>
+        </div>
       </div>
+
+      {/* Protected Payouts Security Notice */}
+      <div
+        className="flex-between mb-4 p-3 rounded-lg"
+        style={{
+          background: "rgba(16, 185, 129, 0.08)",
+          border: "1px solid rgba(16, 185, 129, 0.3)",
+          flexWrap: "wrap",
+          gap: 10
+        }}
+      >
+        <div className="flex-center gap-2" style={{ fontSize: 13 }}>
+          <ShieldCheck size={18} style={{ color: "#10b981", flexShrink: 0 }} />
+          <span>
+            <strong>Protected Payouts:</strong> Approving, rejecting/refunding, and deleting withdrawal requests require admin password re-authentication, are rate-limited, and are recorded in the immutable security audit trail.
+          </span>
+        </div>
+      </div>
+
+      {/* Forensic Security Audit Log Panel */}
+      {auditOpen && (
+        <div className="card mb-6">
+          <div className="card-body">
+            <div className="flex-between mb-3" style={{ flexWrap: "wrap", gap: 10 }}>
+              <div className="flex-center gap-2">
+                <Lock size={16} style={{ color: "var(--warning)" }} />
+                <h3 style={{ margin: 0, fontSize: 16 }}>Immutable Withdrawal Audit Log</h3>
+              </div>
+              <button className="btn btn-ghost btn-sm" onClick={fetchAuditLogs} disabled={auditLoading}>
+                <RefreshCw size={14} className={auditLoading ? "spinner" : ""} />
+                <span>Reload Log</span>
+              </button>
+            </div>
+
+            {auditError && (
+              <div className="p-3 mb-3 rounded" style={{ background: "rgba(239,68,68,0.15)", border: "1px solid var(--danger)", color: "var(--danger)", fontSize: 13 }}>
+                {auditError}
+              </div>
+            )}
+
+            {auditLoading ? (
+              <p className="text-muted text-sm">Loading audit trail...</p>
+            ) : auditLogs.length === 0 ? (
+              <p className="text-muted text-sm">No withdrawal payout or deletion events have been recorded yet.</p>
+            ) : (
+              <div className="table-responsive">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Admin</th>
+                      <th>Action</th>
+                      <th>Records</th>
+                      <th>IDs / Total Amount</th>
+                      <th>IP Address</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {auditLogs.map(log => {
+                      const snap = Array.isArray(log.snapshot) ? log.snapshot : [];
+                      const totalAmt = snap.reduce((acc, s) => acc + parseFloat(s.amount || 0), 0);
+                      return (
+                        <tr key={log.id}>
+                          <td className="text-xs text-muted">{new Date(log.created_at).toLocaleString()}</td>
+                          <td className="text-sm font-medium">{log.admin_username || log.admin_id?.slice(0, 8) || "Admin"}</td>
+                          <td><span className="badge badge-warning">{log.action}</span></td>
+                          <td className="text-sm">{(log.target_ids || []).length}</td>
+                          <td className="text-xs font-mono">
+                            {(log.target_ids || []).slice(0, 3).map(id => id.slice(0, 8)).join(", ")}
+                            {(log.target_ids || []).length > 3 ? ` +${log.target_ids.length - 3} more` : ""}
+                            {snap.length > 0 ? ` (${totalAmt.toLocaleString()} ETB)` : ""}
+                          </td>
+                          <td className="text-xs font-mono text-muted">{log.ip_address || "—"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* KPI Stats Cards */}
       <div className="stat-grid mb-6">
@@ -734,6 +984,16 @@ export default function Withdrawals() {
                     required={modal.action === "reject"}
                   />
                 </div>
+
+                <AdminPasswordField
+                  id="wdr-process-confirm-pw"
+                  value={modal.confirmPassword}
+                  show={modal.showPassword}
+                  submitting={modal.submitting}
+                  helperText="This payout decision is recorded in the immutable Security Audit Log."
+                  onChange={val => setModal(prev => ({ ...prev, confirmPassword: val, error: null }))}
+                  onToggleShow={() => setModal(prev => ({ ...prev, showPassword: !prev.showPassword }))}
+                />
               </div>
 
               <div className="modal-footer">
@@ -743,7 +1003,7 @@ export default function Withdrawals() {
                 <button
                   type="submit"
                   className={`btn ${modal.action === "approve" ? "btn-success" : "btn-danger"}`}
-                  disabled={modal.submitting}
+                  disabled={modal.submitting || !modal.confirmPassword.trim()}
                 >
                   {modal.submitting ? (
                     <>
@@ -807,6 +1067,17 @@ export default function Withdrawals() {
                   </label>
                 </div>
               )}
+
+              <AdminPasswordField
+                id="wdr-delete-confirm-pw"
+                value={deleteModal.confirmPassword}
+                show={deleteModal.showPassword}
+                submitting={deleteModal.submitting}
+                helperText="A full snapshot of the deleted withdrawal request is preserved in the Security Audit Log."
+                onChange={val => setDeleteModal(prev => ({ ...prev, confirmPassword: val, error: null }))}
+                onToggleShow={() => setDeleteModal(prev => ({ ...prev, showPassword: !prev.showPassword }))}
+                onEnter={() => { if (deleteModal.confirmPassword.trim() && !deleteModal.submitting) submitSingleDelete(); }}
+              />
             </div>
 
             <div className="modal-footer">
@@ -817,7 +1088,7 @@ export default function Withdrawals() {
                 type="button"
                 className="btn btn-danger"
                 onClick={submitSingleDelete}
-                disabled={deleteModal.submitting}
+                disabled={deleteModal.submitting || !deleteModal.confirmPassword.trim()}
               >
                 {deleteModal.submitting ? "Deleting..." : "Delete Request"}
               </button>
@@ -904,6 +1175,16 @@ export default function Withdrawals() {
                     </div>
                   </div>
                 )}
+
+                <AdminPasswordField
+                  id="wdr-bulk-confirm-pw"
+                  value={bulkModal.confirmPassword}
+                  show={bulkModal.showPassword}
+                  submitting={bulkModal.submitting}
+                  helperText="All affected records are locked and recorded in the immutable Security Audit Log."
+                  onChange={val => setBulkModal(prev => ({ ...prev, confirmPassword: val, error: null }))}
+                  onToggleShow={() => setBulkModal(prev => ({ ...prev, showPassword: !prev.showPassword }))}
+                />
               </div>
 
               <div className="modal-footer">
@@ -913,7 +1194,7 @@ export default function Withdrawals() {
                 <button
                   type="submit"
                   className={`btn ${bulkModal.action === "delete" || bulkModal.action === "reject" ? "btn-danger" : "btn-success"}`}
-                  disabled={bulkModal.submitting}
+                  disabled={bulkModal.submitting || !bulkModal.confirmPassword.trim()}
                 >
                   {bulkModal.submitting ? "Processing..." : `Confirm ${bulkModal.action === "delete" ? "Delete" : bulkModal.action === "approve" ? "Approval" : "Rejection"}`}
                 </button>

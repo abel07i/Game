@@ -86,9 +86,10 @@ const api = {
     return request('GET', `/withdrawals${qs ? '?' + qs : ''}`);
   },
   updateWithdrawal: (id, data) => request('PUT', `/withdrawals/${id}`, data),
-  deleteWithdrawal: (id, refundPending = false) => request('DELETE', `/withdrawals/${id}${refundPending ? '?refundPending=true' : ''}`),
-  bulkDeleteWithdrawals: (ids, refundPending = false) => request('POST', '/withdrawals/bulk-delete', { ids, refundPending }),
-  bulkUpdateWithdrawals: (ids, status, notes = '') => request('POST', '/withdrawals/bulk-update', { ids, status, notes }),
+  deleteWithdrawal: (id, refundPending = false, confirmPassword) => request('DELETE', `/withdrawals/${id}${refundPending ? '?refundPending=true' : ''}`, { refundPending, confirmPassword }),
+  bulkDeleteWithdrawals: (ids, refundPending = false, confirmPassword) => request('POST', '/withdrawals/bulk-delete', { ids, refundPending, confirmPassword }),
+  bulkUpdateWithdrawals: (ids, status, notes = '', confirmPassword) => request('POST', '/withdrawals/bulk-update', { ids, status, notes, confirmPassword }),
+  getWithdrawalAuditLogs: () => request('GET', '/withdrawals/audit-logs'),
 
   // Profit
   getProfitSummary: () => request('GET', '/profit/summary'),
