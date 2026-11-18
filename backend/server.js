@@ -322,7 +322,7 @@ app.post('/api/v1/auth/register', registerLimiter, async (req, res) => {
   let inTx = false;
   try {
     const rawPhone = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
-    const rawName  = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+    const rawName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const telegramId = typeof req.body?.telegramId === 'string' && req.body.telegramId.trim() ? req.body.telegramId.trim() : null;
     const rawInviteCode = typeof req.body?.inviteCode === 'string' ? req.body.inviteCode.trim() : '';
@@ -401,7 +401,7 @@ app.post('/api/v1/auth/register', registerLimiter, async (req, res) => {
       inviteBonus
     });
   } catch (err) {
-    if (inTx) await client.query('ROLLBACK').catch(() => {});
+    if (inTx) await client.query('ROLLBACK').catch(() => { });
     if (err.status) {
       return res.status(err.status).json({ error: err.message });
     }
@@ -494,10 +494,63 @@ app.put('/api/v1/auth/profile', playerMiddleware, async (req, res) => {
 app.delete('/api/v1/auth/profile', playerMiddleware, async (req, res) => {
   try {
     const userId = req.playerId; // from verified token
-    await db.query('DELETE FROM users WHERE id = $1', [userId]);
-    res.json({ success: true });
+
+    // 1. Guard against active participation in ongoing games
+    const activeTickets = await db.query(
+      `SELECT COUNT(*) FROM tickets t
+       JOIN rooms r ON t.room_id = r.id
+       WHERE t.user_id = $1 AND t.is_refunded = FALSE AND r.status IN ('open', 'drawing')`,
+      [userId]
+    );
+    if (parseInt(activeTickets.rows[0]?.count || 0, 10) > 0) {
+      return res.status(400).json({
+        error: 'Cannot close account while you have active tickets in ongoing games. Please wait for games to conclude.'
+      });
+    }
+
+    // 2. Guard against pending/processing withdrawals
+    const pendingWithdrawals = await db.query(
+      `SELECT COUNT(*) FROM withdrawal_requests WHERE user_id = $1 AND status IN ('pending', 'processing')`,
+      [userId]
+    );
+    if (parseInt(pendingWithdrawals.rows[0]?.count || 0, 10) > 0) {
+      return res.status(400).json({
+        error: 'Cannot close account while a withdrawal request is pending or processing. Please wait for completion.'
+      });
+    }
+
+    // 3. Guard against remaining positive real or referral balance
+    const walletRes = await db.query(
+      `SELECT mode, balance FROM wallets WHERE user_id = $1 AND balance > 0`,
+      [userId]
+    );
+    const positiveWallets = walletRes.rows.filter(w => parseFloat(w.balance) > 0.01);
+    if (positiveWallets.length > 0) {
+      const totalRemaining = positiveWallets.reduce((acc, w) => acc + parseFloat(w.balance), 0);
+      return res.status(400).json({
+        error: `Cannot close account with an active balance of ${totalRemaining.toFixed(2)} ETB. Please withdraw your funds first.`
+      });
+    }
+
+    // 4. Compliant soft-delete preserving immutable financial ledger integrity
+    // Suffix unique constraints so phone number and invite code can be recycled if needed
+    const deactivatedSuffix = String(userId).replace(/-/g, '').slice(0, 8);
+    await db.query(
+      `UPDATE users
+       SET is_active = FALSE,
+           display_name = 'Deactivated User',
+           phone_number = 'del_' || $2 || '_' || RIGHT(phone_number, 7),
+           invite_code = 'CLOSED_' || $2,
+           password_hash = 'DEACTIVATED_' || $2,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [userId, deactivatedSuffix]
+    );
+
+    res.json({ success: true, message: 'Account closed successfully' });
   } catch (err) {
-    res.status(400).json({ error: 'Failed to delete account' });
+    console.error('Account deactivation error:', err);
+    res.status(500).json({ error: 'Failed to close account' });
   }
 });
 
@@ -799,7 +852,7 @@ app.post('/api/v1/user/invite', playerMiddleware, walletLimiter, async (req, res
       newBalance: result.newBalance
     });
   } catch (err) {
-    if (inTx) await client.query('ROLLBACK').catch(() => {});
+    if (inTx) await client.query('ROLLBACK').catch(() => { });
     res.status(err.status || 400).json({ error: err.message || 'Failed to apply invite code' });
   } finally {
     client.release();
@@ -896,8 +949,14 @@ app.post('/api/v1/wallet/deposit/telebirr', playerMiddleware, walletLimiter, asy
       const statusUrl = verifyData.statusUrl.startsWith('http')
         ? verifyData.statusUrl
         : `https://verify.et${verifyData.statusUrl}`;
-      if (!statusUrl.startsWith('https://verify.et/')) {
+      let parsedStatusUrl;
+      try {
+        parsedStatusUrl = new URL(statusUrl);
+      } catch {
         throw new Error('Invalid payment verification status URL');
+      }
+      if (parsedStatusUrl.protocol !== 'https:' || parsedStatusUrl.hostname !== 'verify.et') {
+        throw new Error('Invalid payment verification status URL origin');
       }
 
       while (retries > 0 && !completed) {
@@ -1485,10 +1544,35 @@ io.on('connection', (socket) => {
   });
 
   // Allow authenticated players to join their personal user channel for real-time commission & payout alerts
+  // Strictly verifies JWT signature to prevent IDOR / unauthorized eavesdropping
   socket.on('user:subscribe', (payload) => {
-    if (payload && payload.userId && isValidUuid(payload.userId)) {
-      socket.join(`user_${payload.userId}`);
+    try {
+      const rawToken = (payload && typeof payload.token === 'string')
+        ? payload.token
+        : (typeof socket.handshake?.auth?.token === 'string' ? socket.handshake.auth.token : null);
+      if (!rawToken) return;
+      const cleanToken = rawToken.startsWith('Bearer ') ? rawToken.slice(7) : rawToken;
+      const decoded = verifyToken(cleanToken);
+      if (decoded && decoded.id && isValidUuid(decoded.id)) {
+        socket.join(`user_${decoded.id}`);
+      }
+    } catch (_) {
+      // Reject invalid or unverified subscription attempt
     }
+  });
+
+  socket.on('user:unsubscribe', (payload) => {
+    try {
+      const rawToken = (payload && typeof payload.token === 'string')
+        ? payload.token
+        : (typeof socket.handshake?.auth?.token === 'string' ? socket.handshake.auth.token : null);
+      if (!rawToken) return;
+      const cleanToken = rawToken.startsWith('Bearer ') ? rawToken.slice(7) : rawToken;
+      const decoded = verifyToken(cleanToken);
+      if (decoded && decoded.id && isValidUuid(decoded.id)) {
+        socket.leave(`user_${decoded.id}`);
+      }
+    } catch (_) {}
   });
 });
 

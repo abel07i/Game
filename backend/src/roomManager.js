@@ -239,6 +239,8 @@ class RoomManager {
 
   // ─── Delete / Cancel a game room ──────────────────────────────────────────
   async deleteRoom(roomId) {
+    const room = this.rooms.get(roomId);
+
     // Check if tickets were purchased
     const ticketCheck = await db.query('SELECT COUNT(*) FROM tickets WHERE room_id = $1 AND is_refunded = FALSE', [roomId]);
     const soldTickets = parseInt(ticketCheck.rows[0].count);
@@ -253,7 +255,7 @@ class RoomManager {
       await referralManager.reverseCommissionsForRoom({
         client: db,
         roomId,
-        roomNumber: room.roomNumber,
+        roomNumber: room?.roomNumber || roomId,
         reason: 'Room cancelled & refunded by admin',
         io: this.io
       }).catch(err => console.error('Failed to reverse referral commissions on delete:', err));

@@ -293,13 +293,25 @@ export default function App() {
         if (typeof newUser === 'function') {
             setUserState((prev) => {
                 const updated = newUser(prev);
-                if (updated) localStorage.setItem('fastderash_user', JSON.stringify(updated));
-                else { localStorage.removeItem('fastderash_user'); localStorage.removeItem('fastderash_token'); }
+                if (updated) {
+                    localStorage.setItem('fastderash_user', JSON.stringify(updated));
+                } else {
+                    const oldToken = localStorage.getItem('fastderash_token');
+                    if (oldToken) getSocket()?.emit('user:unsubscribe', { token: oldToken });
+                    localStorage.removeItem('fastderash_user');
+                    localStorage.removeItem('fastderash_token');
+                }
                 return updated;
             });
         } else {
-            if (newUser) localStorage.setItem('fastderash_user', JSON.stringify(newUser));
-            else { localStorage.removeItem('fastderash_user'); localStorage.removeItem('fastderash_token'); }
+            if (newUser) {
+                localStorage.setItem('fastderash_user', JSON.stringify(newUser));
+            } else {
+                const oldToken = localStorage.getItem('fastderash_token');
+                if (oldToken) getSocket()?.emit('user:unsubscribe', { token: oldToken });
+                localStorage.removeItem('fastderash_user');
+                localStorage.removeItem('fastderash_token');
+            }
             setUserState(newUser);
         }
     };
@@ -1655,8 +1667,9 @@ export default function App() {
         if (!socket) return;
 
         const subscribeUser = () => {
-            if (user?.id) {
-                socket.emit('user:subscribe', { userId: user.id });
+            const token = localStorage.getItem('fastderash_token');
+            if (user?.id && token) {
+                socket.emit('user:subscribe', { token, userId: user.id });
             }
         };
 

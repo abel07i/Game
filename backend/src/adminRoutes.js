@@ -283,7 +283,7 @@ router.post('/auth/login', adminLoginLimiter, async (req, res) => {
     // Transparently upgrade legacy SHA-256 hash to bcrypt
     if (!admin.password_hash.startsWith('$2')) {
       const upgraded = await hashPassword(password);
-      await db.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [upgraded, admin.id]).catch(() => {});
+      await db.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [upgraded, admin.id]).catch(() => { });
     }
 
     await db.query(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [admin.id]);
@@ -740,7 +740,7 @@ router.post('/players/bulk-delete', adminMiddleware, adminPrivilegedLimiter, asy
     await client.query('COMMIT');
     res.json({ success: true, count: delRes.rowCount });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     console.error('Bulk delete players error:', err);
     res.status(400).json({ error: 'Cannot delete some players. They may have active tickets or financial records.' });
   } finally {
@@ -896,7 +896,7 @@ router.get('/games', adminMiddleware, adminReadLimiter, async (req, res) => {
     const params = [];
 
     if (status) { params.push(String(status)); whereClause += ` AND r.status = $${params.length}`; }
-    if (tier)   { params.push(String(tier));   whereClause += ` AND r.tier = $${params.length}`; }
+    if (tier) { params.push(String(tier)); whereClause += ` AND r.tier = $${params.length}`; }
     if (cleanSearch) { params.push(cleanSearch); whereClause += ` AND r.room_number::TEXT = $${params.length}`; }
 
     const countResult = await db.query(`SELECT COUNT(*) FROM rooms r ${whereClause}`, params);
@@ -979,7 +979,7 @@ router.post('/games/:id/refund', adminMiddleware, adminPrivilegedLimiter, async 
       reason: 'Manually refunded by admin',
       io: roomManager.io
     }).catch(err => console.error('Failed to reverse referral commissions:', err));
-    
+
     if (roomManager.io) {
       roomManager.io.emit('room:refunded', { roomId, reason: 'Manually refunded by admin' });
       roomManager.io.emit('room:state_update', roomManager.getRoomSummaries());
@@ -995,7 +995,7 @@ router.post('/games/:id/refund', adminMiddleware, adminPrivilegedLimiter, async 
       snapshot: roomRes.rows,
       req
     });
-    
+
     res.json({ success: true, message: 'Room manually refunded successfully' });
   } catch (err) {
     console.error('Refund game error:', err);
@@ -1008,16 +1008,16 @@ router.post('/games/:id/force-start', adminMiddleware, adminPrivilegedLimiter, a
     const roomId = req.params.id;
     const roomManager = require('./roomManager');
     const room = roomManager.rooms.get(roomId);
-    
+
     if (!room || room.status !== 'open') {
       return res.status(400).json({ error: 'Room is not open or not active in memory' });
     }
-    
+
     const uniqueUsers = new Set(room.seats.map(s => s.userId)).size;
     if (uniqueUsers < 2) {
-       return res.status(400).json({ error: 'Need at least 2 unique players to force start' });
+      return res.status(400).json({ error: 'Need at least 2 unique players to force start' });
     }
-    
+
     roomManager.startRoomGame(roomId, true);
     await recordAdminAudit(db, {
       adminId: req.admin.id,
@@ -1028,7 +1028,7 @@ router.post('/games/:id/force-start', adminMiddleware, adminPrivilegedLimiter, a
       snapshot: [{ roomId, filledSeats: room.seats.length, uniqueUsers }],
       req
     });
-    
+
     res.json({ success: true, message: 'Game forced to start successfully' });
   } catch (err) {
     console.error('Force start game error:', err);
@@ -1055,7 +1055,7 @@ router.post('/games', adminMiddleware, adminPrivilegedLimiter, async (req, res) 
     if (!tierCategory) {
       if (jackpotNum >= 100000) tierCategory = 'gold';
       else if (jackpotNum >= 10000) tierCategory = 'silver';
-      else if (jackpotNum >= 1000)  tierCategory = 'bronze';
+      else if (jackpotNum >= 1000) tierCategory = 'bronze';
       else tierCategory = 'starter';
     } else if (!ALLOWED_TIERS.has(String(tierCategory))) {
       return res.status(400).json({ error: 'Invalid tier category' });
@@ -1189,10 +1189,10 @@ router.get('/transactions', adminMiddleware, adminReadLimiter, async (req, res) 
     let whereClause = 'WHERE 1=1';
     const params = [];
 
-    if (type)     { params.push(String(type));     whereClause += ` AND t.tx_type = $${params.length}`; }
-    if (status)   { params.push(String(status));   whereClause += ` AND t.status = $${params.length}`; }
+    if (type) { params.push(String(type)); whereClause += ` AND t.tx_type = $${params.length}`; }
+    if (status) { params.push(String(status)); whereClause += ` AND t.status = $${params.length}`; }
     if (dateFrom) { params.push(String(dateFrom)); whereClause += ` AND t.created_at >= $${params.length}::DATE`; }
-    if (dateTo)   { params.push(String(dateTo));   whereClause += ` AND t.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
+    if (dateTo) { params.push(String(dateTo)); whereClause += ` AND t.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
     if (cleanSearch) {
       params.push(`%${cleanSearch}%`);
       whereClause += ` AND (u.display_name ILIKE $${params.length} OR u.phone_number ILIKE $${params.length} OR COALESCE(t.reference_note, '') ILIKE $${params.length})`;
@@ -1277,7 +1277,7 @@ router.delete('/transactions/:id', adminMiddleware, txMutationLimiter, async (re
     await client.query('COMMIT');
     res.json({ success: true, message: 'Transaction deleted and logged', id: deletedIds[0] });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     console.error('Delete transaction error:', err);
     res.status(500).json({ error: 'Failed to delete transaction' });
   } finally {
@@ -1320,7 +1320,7 @@ router.post('/transactions/bulk-delete', adminMiddleware, txMutationLimiter, asy
       deletedIds
     });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     console.error('Bulk delete transactions error:', err);
     res.status(500).json({ error: 'Failed to bulk delete transactions' });
   } finally {
@@ -1404,7 +1404,7 @@ router.get('/reports/players', adminMiddleware, adminReadLimiter, async (req, re
     let whereClause = `WHERE u.role = 'player'`;
     const params = [];
     if (dateFrom) { params.push(String(dateFrom)); whereClause += ` AND u.created_at >= $${params.length}::DATE`; }
-    if (dateTo)   { params.push(String(dateTo));   whereClause += ` AND u.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
+    if (dateTo) { params.push(String(dateTo)); whereClause += ` AND u.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
 
     const result = await db.query(`
       SELECT
@@ -1446,9 +1446,9 @@ router.get('/reports/games', adminMiddleware, adminReadLimiter, async (req, res)
     let whereClause = 'WHERE 1=1';
     const params = [];
     if (dateFrom) { params.push(String(dateFrom)); whereClause += ` AND r.started_at >= $${params.length}::DATE`; }
-    if (dateTo)   { params.push(String(dateTo));   whereClause += ` AND r.started_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
-    if (tier)     { params.push(String(tier));     whereClause += ` AND r.tier = $${params.length}`; }
-    if (status)   { params.push(String(status));   whereClause += ` AND r.status = $${params.length}`; }
+    if (dateTo) { params.push(String(dateTo)); whereClause += ` AND r.started_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
+    if (tier) { params.push(String(tier)); whereClause += ` AND r.tier = $${params.length}`; }
+    if (status) { params.push(String(status)); whereClause += ` AND r.status = $${params.length}`; }
 
     const result = await db.query(`
       SELECT r.room_number, r.tier, r.target_jackpot, r.group_size, r.ticket_price, r.filled_seats,
@@ -1479,8 +1479,8 @@ router.get('/reports/transactions', adminMiddleware, adminReadLimiter, async (re
     let whereClause = 'WHERE 1=1';
     const params = [];
     if (dateFrom) { params.push(String(dateFrom)); whereClause += ` AND t.created_at >= $${params.length}::DATE`; }
-    if (dateTo)   { params.push(String(dateTo));   whereClause += ` AND t.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
-    if (type)     { params.push(String(type));     whereClause += ` AND t.tx_type = $${params.length}`; }
+    if (dateTo) { params.push(String(dateTo)); whereClause += ` AND t.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
+    if (type) { params.push(String(type)); whereClause += ` AND t.tx_type = $${params.length}`; }
 
     const result = await db.query(`
       SELECT t.id, t.tx_type, t.amount, t.direction, t.running_balance, t.status, t.reference_note, t.created_at,
@@ -1508,7 +1508,7 @@ router.get('/reports/profit', adminMiddleware, adminReadLimiter, async (req, res
     let whereClause = 'WHERE 1=1';
     const params = [];
     if (dateFrom) { params.push(String(dateFrom)); whereClause += ` AND pt.collected_at >= $${params.length}::DATE`; }
-    if (dateTo)   { params.push(String(dateTo));   whereClause += ` AND pt.collected_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
+    if (dateTo) { params.push(String(dateTo)); whereClause += ` AND pt.collected_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
 
     const result = await db.query(`
       SELECT r.room_number, r.tier, pt.gross_pool, pt.tax_rate, pt.tax_collected AS profit,
@@ -1633,10 +1633,10 @@ router.put('/settings', adminMiddleware, adminPrivilegedLimiter, async (req, res
       action: 'update_settings',
       targetType: 'settings',
       targetIds: changedKeys,
-      snapshot: [{ 
-        changedKeys, 
+      snapshot: [{
+        changedKeys,
         platformFee: platformFee !== undefined ? Number(platformFee) : undefined,
-        referralCommissionRate: referralCommissionRate !== undefined ? Number(referralCommissionRate) : undefined 
+        referralCommissionRate: referralCommissionRate !== undefined ? Number(referralCommissionRate) : undefined
       }],
       req
     });
@@ -1992,7 +1992,7 @@ router.put('/withdrawals/:id', adminMiddleware, withdrawalMutationLimiter, async
     await client.query('COMMIT');
     res.json({ success: true, status, id });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     console.error('Update withdrawal error:', err);
     res.status(500).json({ error: 'Failed to update withdrawal request' });
   } finally {
@@ -2031,7 +2031,7 @@ router.delete('/withdrawals/:id', adminMiddleware, withdrawalMutationLimiter, as
     await client.query('COMMIT');
     res.json({ success: true, message: 'Withdrawal request deleted and logged', id: delResult.deletedIds[0] });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     console.error('Delete withdrawal error:', err);
     res.status(500).json({ error: 'Failed to delete withdrawal request' });
   } finally {
@@ -2080,7 +2080,7 @@ router.post('/withdrawals/bulk-delete', adminMiddleware, withdrawalMutationLimit
       deletedIds: delResult.deletedIds
     });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     console.error('Bulk delete withdrawals error:', err);
     res.status(500).json({ error: 'Failed to perform bulk delete' });
   } finally {
@@ -2147,7 +2147,7 @@ router.post('/withdrawals/bulk-update', adminMiddleware, withdrawalMutationLimit
       processedIds
     });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     console.error('Bulk update withdrawals error:', err);
     res.status(500).json({ error: 'Failed to perform bulk update' });
   } finally {
