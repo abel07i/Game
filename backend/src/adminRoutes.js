@@ -1547,6 +1547,8 @@ router.get('/settings', adminMiddleware, adminReadLimiter, async (req, res) => {
       prizePct: 1 - platformFee,
       referralCommissionRate: referralCommissionRate,
       referralCommissionRatePercent: Math.round(referralCommissionRate * 1000) / 10,
+      minWithdrawalAmount: parseFloat(configMap.MIN_WITHDRAWAL_AMOUNT || '500'),
+      maxWithdrawalAmount: parseFloat(configMap.MAX_WITHDRAWAL_AMOUNT || '50000'),
       telebirrPhone: configMap.TELEBIRR_PHONE || '',
       telebirrName: configMap.TELEBIRR_NAME || '',
       hasVerifyEtApiKey: Boolean(rawKey),
@@ -1576,7 +1578,7 @@ router.get('/settings/audit-logs', adminMiddleware, adminReadLimiter, async (req
 
 router.put('/settings', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
-    const { telebirrPhone, telebirrName, verifyEtApiKey, platformFee, referralCommissionRate, confirmPassword } = req.body || {};
+    const { telebirrPhone, telebirrName, verifyEtApiKey, platformFee, referralCommissionRate, minWithdrawalAmount, confirmPassword } = req.body || {};
 
     if (platformFee !== undefined) {
       const feeNum = Number(platformFee);
@@ -1588,6 +1590,12 @@ router.put('/settings', adminMiddleware, adminPrivilegedLimiter, async (req, res
       const rateNum = Number(referralCommissionRate);
       if (!Number.isFinite(rateNum) || rateNum < 0 || rateNum > 0.50) {
         return res.status(400).json({ error: 'Referral commission rate must be between 0% and 50% (0.00 to 0.50)' });
+      }
+    }
+    if (minWithdrawalAmount !== undefined) {
+      const minNum = Number(minWithdrawalAmount);
+      if (!Number.isFinite(minNum) || minNum < 1 || minNum > 100000) {
+        return res.status(400).json({ error: 'Minimum withdrawal amount must be between 1 and 100,000 ETB' });
       }
     }
     if (telebirrPhone !== undefined && String(telebirrPhone).trim().length > 30) {
@@ -1614,6 +1622,10 @@ router.put('/settings', adminMiddleware, adminPrivilegedLimiter, async (req, res
       await referralManager.setCommissionRate(Number(referralCommissionRate));
       changedKeys.push('REFERRAL_COMMISSION_RATE');
     }
+    if (minWithdrawalAmount !== undefined) {
+      await db.query('INSERT INTO system_config (config_key, config_value) VALUES ($1, $2) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value', ['MIN_WITHDRAWAL_AMOUNT', String(Number(minWithdrawalAmount))]);
+      changedKeys.push('MIN_WITHDRAWAL_AMOUNT');
+    }
     if (telebirrPhone !== undefined) {
       await db.query('INSERT INTO system_config (config_key, config_value) VALUES ($1, $2) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value', ['TELEBIRR_PHONE', String(telebirrPhone).trim()]);
       changedKeys.push('TELEBIRR_PHONE');
@@ -1636,7 +1648,8 @@ router.put('/settings', adminMiddleware, adminPrivilegedLimiter, async (req, res
       snapshot: [{
         changedKeys,
         platformFee: platformFee !== undefined ? Number(platformFee) : undefined,
-        referralCommissionRate: referralCommissionRate !== undefined ? Number(referralCommissionRate) : undefined
+        referralCommissionRate: referralCommissionRate !== undefined ? Number(referralCommissionRate) : undefined,
+        minWithdrawalAmount: minWithdrawalAmount !== undefined ? Number(minWithdrawalAmount) : undefined
       }],
       req
     });

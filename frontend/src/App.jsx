@@ -420,7 +420,7 @@ export default function App() {
     const [referralDashboard, setReferralDashboard] = useState(null);
     const [referralLoading, setReferralLoading] = useState(false);
     const [referralViewTab, setReferralViewTab] = useState('overview');
-    const [systemConfig, setSystemConfig] = useState({ telebirrPhone: '0949626463', telebirrName: 'Abel Wondmeneh', seatQuotas: null });
+    const [systemConfig, setSystemConfig] = useState({ telebirrPhone: '0949626463', telebirrName: 'Abel Wondmeneh', minWithdrawal: 500, maxWithdrawal: 50000, seatQuotas: null });
     const [wizard, setWizard] = useState({ groupSize: 10, seatNumbers: [1], jackpot: 500 });
     const [wizardStep, setWizardStep] = useState(1); // 1 = choose prize, 2 = choose players & join
     const [roomSubTab, setRoomSubTab] = useState('players'); // 'players' | 'results' inside active room
@@ -1308,10 +1308,12 @@ export default function App() {
         fetch(`${API_URL}/api/v1/config`)
             .then(res => res.json())
             .then(data => {
-                if (data.telebirrPhone || data.telebirrName || data.seatQuotas) {
+                if (data.telebirrPhone || data.telebirrName || data.seatQuotas || data.minWithdrawal) {
                     setSystemConfig(prev => ({
                         telebirrPhone: data.telebirrPhone || prev.telebirrPhone || '0949626463',
                         telebirrName: data.telebirrName || prev.telebirrName || 'Abel Wondmeneh',
+                        minWithdrawal: Number(data.minWithdrawal) || prev.minWithdrawal || 500,
+                        maxWithdrawal: Number(data.maxWithdrawal) || prev.maxWithdrawal || 50000,
                         seatQuotas: data.seatQuotas || prev.seatQuotas
                     }));
                 }
@@ -1930,8 +1932,14 @@ export default function App() {
             payload.transactionId = walletModal.transactionId.trim();
         } else {
             const amount = parseFloat(walletModal.amount);
+            const minWithdraw = systemConfig.minWithdrawal || 500;
             if (isNaN(amount) || amount <= 0) {
                 showAlert('Invalid amount', 'warning');
+                setWalletModal(prev => ({ ...prev, loading: false }));
+                return;
+            }
+            if (amount < minWithdraw) {
+                showAlert(`Minimum withdrawal amount is ${minWithdraw} ETB`, 'warning');
                 setWalletModal(prev => ({ ...prev, loading: false }));
                 return;
             }
@@ -1973,13 +1981,14 @@ export default function App() {
             payload.transactionId = walletTabState.transactionId.trim();
         } else {
             const amount = parseFloat(walletTabState.amount);
+            const minWithdraw = systemConfig.minWithdrawal || 500;
             if (isNaN(amount) || amount <= 0) {
                 showAlert('Invalid amount', 'warning');
                 setWalletTabState(prev => ({ ...prev, loading: false }));
                 return;
             }
-            if (amount < 10) {
-                showAlert('Minimum withdrawal amount is 10 ETB', 'warning');
+            if (amount < minWithdraw) {
+                showAlert(`Minimum withdrawal amount is ${minWithdraw} ETB`, 'warning');
                 setWalletTabState(prev => ({ ...prev, loading: false }));
                 return;
             }
@@ -3533,21 +3542,21 @@ export default function App() {
                                                                 <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-white/40 font-bold text-xs sm:text-sm">ETB</span>
                                                                 <input
                                                                     type="number"
-                                                                    min="10"
+                                                                    min={systemConfig.minWithdrawal || 500}
                                                                     step="1"
                                                                     required
                                                                     disabled={Boolean(pendingWithdrawal)}
                                                                     value={walletTabState.amount}
                                                                     onChange={e => setWalletTabState({ ...walletTabState, amount: e.target.value })}
                                                                     className="w-full bg-black/60 border border-white/10 rounded-xl pl-12 pr-3.5 py-2.5 sm:py-3 text-sm sm:text-base font-mono font-bold text-white focus:outline-none focus:border-gold-500 transition placeholder-white/20 disabled:opacity-50"
-                                                                    placeholder="Min: 10.00"
+                                                                    placeholder={`Min: ${(systemConfig.minWithdrawal || 500).toFixed(2)}`}
                                                                 />
                                                             </div>
 
                                                             {/* Quick Presets */}
-                                                            {!pendingWithdrawal && currentBal >= 10 && (
+                                                            {!pendingWithdrawal && currentBal >= (systemConfig.minWithdrawal || 500) && (
                                                                 <div className="flex gap-1.5 mt-2 overflow-x-auto pb-1">
-                                                                    {[50, 100, 200, 500].filter(amt => amt <= currentBal).map(preset => (
+                                                                    {[500, 1000, 2000, 5000].filter(amt => amt <= currentBal).map(preset => (
                                                                         <button
                                                                             key={preset}
                                                                             type="button"
@@ -3583,11 +3592,11 @@ export default function App() {
 
                                                         <button
                                                             type="submit"
-                                                            disabled={walletTabState.loading || Boolean(pendingWithdrawal) || currentBal < 10}
+                                                            disabled={walletTabState.loading || Boolean(pendingWithdrawal) || currentBal < (systemConfig.minWithdrawal || 500)}
                                                             className="w-full py-2.5 sm:py-3 rounded-xl bg-gold-600 hover:bg-gold-500 text-black font-black text-xs sm:text-sm transition shadow-[0_0_15px_rgba(234,161,27,0.2)] flex items-center justify-center gap-1.5 active:scale-98 disabled:opacity-50 disabled:cursor-not-allowed"
                                                         >
                                                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" x2="12" y1="3" y2="15" /></svg>
-                                                            {walletTabState.loading ? t('withdrawing') : pendingWithdrawal ? 'Pending Request Active' : currentBal < 10 ? 'Insufficient Balance' : t('withdraw')}
+                                                            {walletTabState.loading ? t('withdrawing') : pendingWithdrawal ? 'Pending Request Active' : currentBal < (systemConfig.minWithdrawal || 500) ? `Min ${systemConfig.minWithdrawal || 500} ETB Required` : t('withdraw')}
                                                         </button>
                                                     </form>
                                                 </div>
@@ -4895,13 +4904,13 @@ export default function App() {
                                         <span className="absolute left-4 top-1/2 -translate-y-1/2 text-white/40 font-bold">ETB</span>
                                         <input
                                             type="number"
-                                            min="1"
+                                            min={systemConfig.minWithdrawal || 500}
                                             step="1"
                                             required
                                             value={walletModal.amount}
                                             onChange={e => setWalletModal({ ...walletModal, amount: e.target.value })}
                                             className="w-full bg-black/40 border border-white/10 rounded-xl pl-12 pr-4 py-3 text-lg font-mono font-bold text-white focus:outline-none focus:border-equb-500 transition"
-                                            placeholder="0.00"
+                                            placeholder={`Min: ${(systemConfig.minWithdrawal || 500).toFixed(2)}`}
                                             autoFocus
                                         />
                                     </div>

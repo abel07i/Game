@@ -53,6 +53,8 @@ export default function Settings() {
   const [platformFeeInput, setPlatformFeeInput] = useState("");
   // Lifetime referral commission rate state
   const [referralRateInput, setReferralRateInput] = useState("1.0");
+  // Minimum withdrawal threshold state
+  const [minWithdrawalInput, setMinWithdrawalInput] = useState("500");
 
   // Telebirr state
   const [paymentConfig, setPaymentConfig] = useState({ phone: "", name: "", apiKey: "" });
@@ -77,6 +79,7 @@ export default function Settings() {
         if (setRes) {
           setPlatformFeeInput((setRes.platformFee * 100).toString());
           setReferralRateInput(setRes.referralCommissionRatePercent != null ? setRes.referralCommissionRatePercent.toString() : (setRes.referralCommissionRate != null ? (setRes.referralCommissionRate * 100).toString() : '1.0'));
+          setMinWithdrawalInput(setRes.minWithdrawalAmount != null ? setRes.minWithdrawalAmount.toString() : '500');
           setPaymentConfig({
             phone: setRes.telebirrPhone || '',
             name: setRes.telebirrName || '',
@@ -360,6 +363,27 @@ export default function Settings() {
     });
   };
 
+  const handleUpdateMinWithdrawal = (e) => {
+    e.preventDefault();
+    const minVal = parseFloat(minWithdrawalInput);
+    if (isNaN(minVal) || minVal < 1 || minVal > 100000) {
+      alert("Invalid minimum withdrawal amount (must be between 1 and 100,000 ETB)");
+      return;
+    }
+    setError("");
+    openStepUpModal({
+      title: "Update Minimum Withdrawal Threshold",
+      description: `Change minimum withdrawal threshold to ${minVal.toLocaleString()} ETB? Players must accumulate at least this balance before submitting payout requests.`,
+      confirmLabel: "Update Withdrawal Limit",
+      onConfirm: async (confirmPassword) => {
+        await api.updateSettings({ minWithdrawalAmount: minVal, confirmPassword });
+        setMessage("Minimum withdrawal threshold updated successfully!");
+        fetchSettings();
+        setTimeout(() => setMessage(""), 5000);
+      }
+    });
+  };
+
   if (loading) return <div className="loading-overlay"><div className="spinner"></div></div>;
 
   return (
@@ -521,6 +545,54 @@ export default function Settings() {
             </div>
             <button type="submit" className="btn btn-primary" style={{ padding: "11px 20px" }}>
               Update Commission Rate
+            </button>
+          </form>
+        </div>
+
+        {/* Minimum Withdrawal Threshold Form */}
+        <div style={{ borderTop: '1px solid var(--border)', paddingTop: 32, marginBottom: 32 }}>
+          <h3 style={{ fontWeight: 600, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+            <ShieldCheck size={18} color="var(--primary)"/> Minimum Withdrawal Threshold
+          </h3>
+          <p style={{ color: "var(--text-muted)", fontSize: 14, marginBottom: 16 }}>
+            Set the minimum balance players must accumulate before submitting payout requests. Applies to both game winnings and referral commission payouts.
+          </p>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 20 }}>
+            <div style={{ background: "var(--bg-secondary)", padding: 14, borderRadius: 8, border: "1px solid var(--border)" }}>
+              <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 4 }}>Current Minimum Payout</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--primary)" }}>
+                {data.settings?.minWithdrawalAmount != null ? data.settings.minWithdrawalAmount : 500} ETB
+              </div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>Enforced server-side on all player withdrawals</div>
+            </div>
+            <div style={{ background: "var(--bg-secondary)", padding: 14, borderRadius: 8, border: "1px solid var(--border)" }}>
+              <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 4 }}>Maximum Payout / Request</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--text-primary)" }}>
+                {data.settings?.maxWithdrawalAmount != null ? data.settings.maxWithdrawalAmount.toLocaleString() : "50,000"} ETB
+              </div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>Single request upper ceiling</div>
+            </div>
+          </div>
+
+          <form onSubmit={handleUpdateMinWithdrawal} style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <div style={{ flex: '1 1 200px' }}>
+              <label style={{ fontSize: 13, marginBottom: 4, display: "block", color: "var(--text-secondary)" }}>
+                New Minimum Withdrawal (ETB) (1 – 100,000 ETB)
+              </label>
+              <input
+                type="number"
+                step="1"
+                min="1"
+                max="100000"
+                className="form-input"
+                required
+                value={minWithdrawalInput}
+                onChange={e => setMinWithdrawalInput(e.target.value)}
+              />
+            </div>
+            <button type="submit" className="btn btn-primary" style={{ padding: "11px 20px" }}>
+              Update Withdrawal Limit
             </button>
           </form>
         </div>

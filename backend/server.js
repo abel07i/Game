@@ -864,7 +864,7 @@ app.post('/api/v1/user/invite', playerMiddleware, walletLimiter, async (req, res
 app.get('/api/v1/config', async (req, res) => {
   try {
     const [sysConfig, quotaRows] = await Promise.all([
-      db.query(`SELECT * FROM system_config WHERE config_key IN ('TELEBIRR_PHONE', 'TELEBIRR_NAME')`),
+      db.query(`SELECT * FROM system_config WHERE config_key IN ('TELEBIRR_PHONE', 'TELEBIRR_NAME', 'MIN_WITHDRAWAL_AMOUNT', 'MAX_WITHDRAWAL_AMOUNT')`),
       db.query(`SELECT group_size, max_seats_per_user FROM seat_quotas ORDER BY group_size`)
     ]);
     const configMap = sysConfig.rows.reduce((acc, row) => ({ ...acc, [row.config_key]: row.config_value }), {});
@@ -875,6 +875,8 @@ app.get('/api/v1/config', async (req, res) => {
     res.json({
       telebirrPhone: configMap.TELEBIRR_PHONE || '',
       telebirrName: configMap.TELEBIRR_NAME || '',
+      minWithdrawal: parseFloat(configMap.MIN_WITHDRAWAL_AMOUNT || '500'),
+      maxWithdrawal: parseFloat(configMap.MAX_WITHDRAWAL_AMOUNT || '50000'),
       seatQuotas
     });
   } catch (err) {
@@ -1071,7 +1073,7 @@ app.post('/api/v1/wallet/withdraw', playerMiddleware, walletLimiter, async (req,
     const configMap = {};
     configRes.rows.forEach(r => configMap[r.config_key] = parseFloat(r.config_value));
 
-    const minAmount = configMap['MIN_WITHDRAWAL_AMOUNT'] || 10;
+    const minAmount = configMap['MIN_WITHDRAWAL_AMOUNT'] || 500;
     const maxAmount = configMap['MAX_WITHDRAWAL_AMOUNT'] || 50000;
     const maxPending = configMap['MAX_PENDING_WITHDRAWALS'] || 1;
 

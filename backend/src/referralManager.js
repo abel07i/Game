@@ -551,7 +551,7 @@ class ReferralManager {
     const configMap = {};
     configRes.rows.forEach(r => configMap[r.config_key] = parseFloat(r.config_value));
 
-    const minAmount = configMap['MIN_WITHDRAWAL_AMOUNT'] || 10;
+    const minAmount = configMap['MIN_WITHDRAWAL_AMOUNT'] || 500;
     const maxAmount = configMap['MAX_WITHDRAWAL_AMOUNT'] || 50000;
     const maxPending = configMap['MAX_PENDING_WITHDRAWALS'] || 1;
 
