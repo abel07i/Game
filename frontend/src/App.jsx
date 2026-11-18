@@ -398,13 +398,16 @@ export default function App() {
     }, [seatModal.open, drawModal.open]);
     const [confirmOpenRoom, setConfirmOpenRoom] = useState(false);
     const [walletModal, setWalletModal] = useState({ open: false, action: null, amount: '', transactionId: '', loading: false });
-    const [walletTabState, setWalletTabState] = useState({ active: 'deposit', amount: '', transactionId: '', phone: '', loading: false });
+    const [walletTabState, setWalletTabState] = useState({ active: 'deposit', amount: '', transactionId: '', phone: '', walletType: 'real', loading: false });
     const [myWithdrawals, setMyWithdrawals] = useState([]);
     const [inviteCodeInput, setInviteCodeInput] = useState(() => getSafeStoredInviteCode());
     const [appliedInvite, setAppliedInvite] = useState(false);
     const [inviteLoading, setInviteLoading] = useState(false);
     const [inviteMessage, setInviteMessage] = useState(null);
     const [inviteStats, setInviteStats] = useState({ ownInviteCode: '', totalInvites: 0, referralEarnings: 0 });
+    const [referralDashboard, setReferralDashboard] = useState(null);
+    const [referralLoading, setReferralLoading] = useState(false);
+    const [referralViewTab, setReferralViewTab] = useState('overview');
     const [systemConfig, setSystemConfig] = useState({ telebirrPhone: '0949626463', telebirrName: 'Abel Wondmeneh', seatQuotas: null });
     const [wizard, setWizard] = useState({ groupSize: 10, seatNumbers: [1], jackpot: 500 });
     const [wizardStep, setWizardStep] = useState(1); // 1 = choose prize, 2 = choose players & join
@@ -1309,13 +1312,18 @@ export default function App() {
                 .then(res => res.json())
                 .then(data => {
                     if (data && data.balance !== undefined) {
-                        setUserState(prev => prev ? { ...prev, balance: data.balance } : prev);
+                        setUserState(prev => prev ? { 
+                            ...prev, 
+                            balance: data.balance,
+                            referralBalance: data.referralBalance !== undefined ? data.referralBalance : (prev.referralBalance || 0)
+                        } : prev);
                         // Also update localStorage so it's in sync
                         const saved = localStorage.getItem('fastderash_user');
                         if (saved) {
                             try {
                                 const parsed = JSON.parse(saved);
                                 parsed.balance = data.balance;
+                                if (data.referralBalance !== undefined) parsed.referralBalance = data.referralBalance;
                                 localStorage.setItem('fastderash_user', JSON.stringify(parsed));
                             } catch { }
                         }
@@ -1329,6 +1337,7 @@ export default function App() {
                 .catch(err => console.error('Failed to fetch transactions:', err));
 
             fetchMyWithdrawals();
+            fetchReferralDashboard();
 
             authFetch(`${API_URL}/api/v1/user/invite`)
                 .then(res => res.json())
@@ -1337,8 +1346,13 @@ export default function App() {
                         setInviteStats({
                             ownInviteCode: data.ownInviteCode || '',
                             totalInvites: Number(data.totalInvites) || 0,
-                            referralEarnings: Number(data.referralEarnings) || 0
+                            referralEarnings: Number(data.referralEarnings) || 0,
+                            referralWalletBalance: Number(data.referralWalletBalance) || 0,
+                            commissionRate: Number(data.commissionRate) || 0.01
                         });
+                        if (data.referralWalletBalance !== undefined) {
+                            setUserState(prev => prev ? { ...prev, referralBalance: data.referralWalletBalance } : prev);
+                        }
                         if (data.ownInviteCode) {
                             setUserState(prev => prev ? { ...prev, inviteCode: data.ownInviteCode } : prev);
                         }
@@ -1577,6 +1591,7 @@ export default function App() {
                         }
                     })
                     .catch(() => { });
+                fetchReferralDashboard();
             }
         });
 
@@ -1591,6 +1606,104 @@ export default function App() {
             socket.off('room:refunded');
         };
     }, []);
+
+    const fetchReferralDashboard = async () => {
+        const uid = userRef.current?.id;
+        if (!uid) return;
+        setReferralLoading(true);
+        try {
+            const res = await authFetch(`${API_URL}/api/v1/referral/dashboard`);
+            if (res.ok) {
+                const data = await res.json();
+                setReferralDashboard(data);
+                if (data.referralWallet && typeof data.referralWallet.balance === 'number') {
+                    setUserState(prev => {
+                        const updated = prev ? { ...prev, referralBalance: data.referralWallet.balance } : prev;
+                        if (updated) {
+                            try {
+                                const saved = localStorage.getItem('fastderash_user');
+                                if (saved) {
+                                    const parsed = JSON.parse(saved);
+                                    parsed.referralBalance = data.referralWallet.balance;
+                                    localStorage.setItem('fastderash_user', JSON.stringify(parsed));
+                                }
+                            } catch { }
+                        }
+                        return updated;
+                    });
+                }
+                if (data.ownInviteCode) {
+                    setInviteStats(prev => ({
+                        ...prev,
+                        ownInviteCode: data.ownInviteCode,
+                        totalInvites: data.stats?.totalInvited ?? prev.totalInvites,
+                        referralEarnings: data.stats?.totalCommissionEarned ?? prev.referralEarnings,
+                        referralWalletBalance: data.referralWallet?.balance ?? 0
+                    }));
+                }
+            }
+        } catch (e) {
+            console.error('Failed to load referral dashboard:', e);
+        } finally {
+            setReferralLoading(false);
+        }
+    };
+
+    // User-specific socket room subscription & real-time referral notifications
+    useEffect(() => {
+        const socket = getSocket();
+        if (!socket) return;
+
+        const subscribeUser = () => {
+            if (user?.id) {
+                socket.emit('user:subscribe', { userId: user.id });
+            }
+        };
+
+        subscribeUser();
+        socket.on('connect', subscribeUser);
+
+        const onCommissionEarned = (data) => {
+            if (data && typeof data.newReferralBalance === 'number') {
+                setUserState(prev => prev ? { ...prev, referralBalance: data.newReferralBalance } : prev);
+            }
+            playSeatBuy();
+            triggerConfetti();
+            const msg = languageRef.current === 'am'
+                ? `🎉 እንኳን ደስ አለዎት! ከጓደኛዎ ጨዋታ #${data.roomNumber || ''} አሸናፊነት +${Number(data.amount).toFixed(2)} ብር የኮሚሽን ገቢ አግኝተዋል!`
+                : `🎉 Referral Commission! You earned +${Number(data.amount).toFixed(2)} ETB from Game #${data.roomNumber || ''}!`;
+            showToast(msg);
+            fetchReferralDashboard();
+            fetchMyWithdrawals();
+        };
+
+        const onCommissionReversed = (data) => {
+            if (data && typeof data.newReferralBalance === 'number') {
+                setUserState(prev => prev ? { ...prev, referralBalance: data.newReferralBalance } : prev);
+            }
+            const msg = languageRef.current === 'am'
+                ? `የጨዋታ #${data.roomNumber || ''} ስረዛ ምክንያት ${Number(data.amount).toFixed(2)} ብር ኮሚሽን ተመልሷል።`
+                : `Referral commission of ${Number(data.amount).toFixed(2)} ETB reversed due to cancelled game #${data.roomNumber || ''}.`;
+            showAlert(msg, 'info');
+            fetchReferralDashboard();
+            fetchMyWithdrawals();
+        };
+
+        socket.on('referral:commission_earned', onCommissionEarned);
+        socket.on('referral:commission_reversed', onCommissionReversed);
+
+        return () => {
+            socket.off('connect', subscribeUser);
+            socket.off('referral:commission_earned', onCommissionEarned);
+            socket.off('referral:commission_reversed', onCommissionReversed);
+        };
+    }, [user?.id]);
+
+    useEffect(() => {
+        if (user?.id && (activeTab === 'profile' || activeTab === 'wallet')) {
+            fetchReferralDashboard();
+        }
+    }, [activeTab, user?.id]);
 
     const [isLogin, setIsLogin] = useState(true);
     const [formData, setFormData] = useState(() => ({
@@ -1852,7 +1965,15 @@ export default function App() {
                 setWalletTabState(prev => ({ ...prev, loading: false }));
                 return;
             }
+            if (amount < 10) {
+                showAlert('Minimum withdrawal amount is 10 ETB', 'warning');
+                setWalletTabState(prev => ({ ...prev, loading: false }));
+                return;
+            }
             payload.amount = amount;
+            if (walletTabState.walletType === 'referral') {
+                payload.walletType = 'referral';
+            }
             if (walletTabState.phone) {
                 payload.phoneNumber = walletTabState.phone.trim();
             }
@@ -1867,13 +1988,19 @@ export default function App() {
             const data = await res.json();
             if (data.error) showAlert(data.error, 'error');
             else {
-                setUser(u => ({ ...u, balance: data.balance }));
+                if (payload.walletType === 'referral') {
+                    const newRefBal = data.referralBalance !== undefined ? data.referralBalance : data.balance;
+                    setUser(u => ({ ...u, referralBalance: newRefBal }));
+                } else {
+                    setUser(u => ({ ...u, balance: data.balance }));
+                }
                 setWalletTabState(prev => ({ ...prev, amount: '', transactionId: '', phone: '', loading: false }));
                 if (actionType === 'deposit') {
                     showAlert(`Successfully verified and deposited ${data.depositedAmount || 0} ETB!`, 'success');
                 } else {
                     showAlert(data.message || 'Withdrawal request submitted successfully', 'success');
                     fetchMyWithdrawals();
+                    fetchReferralDashboard();
                 }
 
                 // Refresh transactions
@@ -1912,9 +2039,14 @@ export default function App() {
             } else {
                 showAlert(data.message || 'Withdrawal request cancelled and refunded', 'success');
                 if (data.newBalance !== undefined) {
-                    setUser(u => ({ ...u, balance: data.newBalance }));
+                    if (data.refundedTo === 'referral') {
+                        setUser(u => ({ ...u, referralBalance: data.newBalance }));
+                    } else {
+                        setUser(u => ({ ...u, balance: data.newBalance }));
+                    }
                 }
                 fetchMyWithdrawals();
+                fetchReferralDashboard();
                 authFetch(`${API_URL}/api/v1/wallet/transactions?mode=${mode}`)
                     .then(res => res.json())
                     .then(txData => setWalletTransactions(Array.isArray(txData) ? txData : []))
@@ -1990,6 +2122,7 @@ export default function App() {
                         }
                     })
                     .catch(() => { });
+                fetchReferralDashboard();
             }
         } catch {
             setInviteMessage({ type: 'error', text: 'Network error, please try again' });
@@ -2087,6 +2220,15 @@ export default function App() {
             await navigator.clipboard.writeText(userInviteLink);
             showToast(t('inviteLinkCopied'));
         } catch { }
+    };
+
+    const handleTelegramShare = () => {
+        if (!userInviteLink) return;
+        const shareText = language === 'am'
+            ? `Fast Ekub ይቀላቀሉ እና በየቀኑ በቴሌብር ገንዘብ ያሸንፉ! የግብዣ ኮዴን ይጠቀሙ: ${userInviteCode}`
+            : `Join me on Fast Ekub and win daily cash jackpots with Telebirr! Use my invite code: ${userInviteCode}`;
+        const tgUrl = `https://t.me/share/url?url=${encodeURIComponent(userInviteLink)}&text=${encodeURIComponent(shareText)}`;
+        window.open(tgUrl, '_blank', 'noopener,noreferrer');
     };
 
     const activeRoom = useMemo(() => {
@@ -3160,8 +3302,49 @@ export default function App() {
                         {activeTab === 'wallet' && (
                             <div className="space-y-4 max-w-lg mx-auto animate-fade-in pb-24">
                                 <div className="glass-strong p-4 sm:p-5 rounded-2xl border border-white/10 shadow-xl">
-                                    <p className="text-white/50 text-[11px] uppercase tracking-wider font-semibold mb-0.5 text-center">{t('balance')}</p>
-                                    <h1 className="text-2xl sm:text-3xl font-black text-emerald-400 mb-4 text-center tracking-tight">{(user && user.balance != null ? Number(user.balance).toLocaleString() : '0')} ETB</h1>
+                                    {/* Dual Wallets Summary */}
+                                    <div className="grid grid-cols-2 gap-2.5 mb-3">
+                                        <div className="bg-gradient-to-br from-emerald-950/40 via-surface-900 to-black/60 border border-emerald-500/25 p-3 rounded-xl text-center">
+                                            <div className="flex items-center justify-center gap-1.5 text-emerald-400 text-[10.5px] font-bold uppercase tracking-wider mb-1">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"></path><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"></path></svg>
+                                                <span>Game Wallet</span>
+                                            </div>
+                                            <div className="text-lg sm:text-2xl font-black text-white font-mono tracking-tight">
+                                                {(user && user.balance != null ? Number(user.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00')}
+                                                <span className="text-emerald-400 text-xs ml-1 font-bold">ETB</span>
+                                            </div>
+                                            <div className="text-[10px] text-white/40 mt-0.5">Tickets &amp; Winnings</div>
+                                        </div>
+
+                                        <div className="bg-gradient-to-br from-indigo-950/40 via-surface-900 to-black/60 border border-indigo-500/30 p-3 rounded-xl text-center">
+                                            <div className="flex items-center justify-center gap-1.5 text-indigo-400 text-[10.5px] font-bold uppercase tracking-wider mb-1">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><line x1="19" y1="8" x2="19" y2="14"></line><line x1="22" y1="11" x2="16" y2="11"></line></svg>
+                                                <span>Referral Wallet</span>
+                                            </div>
+                                            <div className="text-lg sm:text-2xl font-black text-white font-mono tracking-tight">
+                                                {(user && user.referralBalance != null ? Number(user.referralBalance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00')}
+                                                <span className="text-indigo-400 text-xs ml-1 font-bold">ETB</span>
+                                            </div>
+                                            <div className="text-[10px] text-indigo-300/60 mt-0.5">1% Lifetime Win Bonus</div>
+                                        </div>
+                                    </div>
+
+                                    {/* 1% Lifetime Bonus Guarantee Banner */}
+                                    <div className="rounded-xl bg-indigo-500/10 border border-indigo-500/25 p-2.5 mb-4 flex items-center justify-between text-xs">
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <span className="text-base shrink-0">🎁</span>
+                                            <div className="text-[11px] text-indigo-200 truncate">
+                                                <strong>1% Lifetime Referral Commission:</strong> Earn 1% of every win your friends take home!
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setActiveTab('profile')}
+                                            className="text-[11px] text-indigo-300 hover:text-white font-bold underline shrink-0 ml-2"
+                                        >
+                                            View Friends
+                                        </button>
+                                    </div>
 
                                     {/* Top Tabs */}
                                     <div className="flex bg-black/40 rounded-xl p-1 mb-4 border border-white/5">
@@ -3251,10 +3434,31 @@ export default function App() {
 
                                     {walletTabState.active === 'withdraw' && (() => {
                                         const pendingWithdrawal = myWithdrawals.find(w => w.status === 'pending');
-                                        const currentBal = parseFloat(user?.balance || 0);
+                                        const isRefWithdraw = walletTabState.walletType === 'referral';
+                                        const currentBal = isRefWithdraw ? parseFloat(user?.referralBalance || 0) : parseFloat(user?.balance || 0);
 
                                         return (
                                             <div className="space-y-3.5">
+                                                {/* Wallet Selector */}
+                                                <div className="flex bg-black/60 p-1 rounded-xl border border-white/10 gap-1.5">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setWalletTabState(prev => ({ ...prev, walletType: 'real', amount: '' }))}
+                                                        className={`flex-1 py-2 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 ${!isRefWithdraw ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm' : 'text-white/50 hover:text-white'}`}
+                                                    >
+                                                        <span>Game Wallet</span>
+                                                        <span className="font-mono text-[11px] opacity-80">({parseFloat(user?.balance || 0).toLocaleString()} ETB)</span>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setWalletTabState(prev => ({ ...prev, walletType: 'referral', amount: '' }))}
+                                                        className={`flex-1 py-2 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 ${isRefWithdraw ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-sm' : 'text-white/50 hover:text-white'}`}
+                                                    >
+                                                        <span>Referral Wallet</span>
+                                                        <span className="font-mono text-[11px] opacity-80">({parseFloat(user?.referralBalance || 0).toLocaleString()} ETB)</span>
+                                                    </button>
+                                                </div>
+
                                                 {/* Active Pending Withdrawal Card */}
                                                 {pendingWithdrawal ? (
                                                     <div className="bg-gradient-to-r from-amber-950/40 to-black/60 border border-amber-500/40 p-4 rounded-xl sm:rounded-2xl space-y-3">
@@ -3397,6 +3601,9 @@ export default function App() {
                                                                                             'bg-red-500/20 text-red-400'
                                                                                 }`}>
                                                                                 {req.status}
+                                                                            </span>
+                                                                            <span className={`px-1.5 py-0.5 rounded text-[9.5px] font-extrabold uppercase ${req.wallet_type === 'referral' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'bg-white/10 text-white/50 border border-white/10'}`}>
+                                                                                {req.wallet_type === 'referral' ? 'Referral' : 'Game'}
                                                                             </span>
                                                                         </div>
                                                                         <div className="text-white/40 text-[10px] mt-0.5">
@@ -3599,115 +3806,299 @@ export default function App() {
                                     </div>
                                 </div>
 
-                                {/* Have an invite code? Section */}
-                                <div className="glass-strong rounded-2xl sm:rounded-3xl p-4 sm:p-5 border border-white/10 shadow-xl space-y-3">
-                                    <div className="flex items-center gap-2.5">
-                                        <div className="w-8 h-8 rounded-xl bg-gold-500/15 border border-gold-500/25 flex items-center justify-center text-gold-400 shrink-0">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 12V8H6a2 2 0 0 1-2-2c0-1.1.9-2 2-2h12v4" /><path d="M4 6v12a2 2 0 0 0 2 2h14v-4" /><path d="M18 12a2 2 0 0 0-2 2c0 1.1.9 2 2 2h4v-4h-4z" /></svg>
+                                {/* Advanced Lifetime Referral & Commission Section */}
+                                <div className="glass-strong rounded-2xl sm:rounded-3xl p-4 sm:p-5 border border-indigo-500/30 shadow-2xl space-y-4 relative overflow-hidden">
+                                    {/* Ambient Glow */}
+                                    <div className="absolute -top-16 -right-16 w-48 h-48 bg-indigo-500/15 blur-3xl rounded-full pointer-events-none"></div>
+
+                                    {/* Header */}
+                                    <div className="flex items-center justify-between gap-2">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500/30 to-purple-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0 shadow-sm">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><line x1="19" y1="8" x2="19" y2="14"></line><line x1="22" y1="11" x2="16" y2="11"></line></svg>
+                                            </div>
+                                            <div>
+                                                <h3 className="text-sm sm:text-base font-black text-white flex items-center gap-1.5">
+                                                    <span>{language === 'am' ? 'የህይወት ዘመን የሪፈራል ኮሚሽን' : 'Lifetime Referral Commission'}</span>
+                                                    <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                                        {referralDashboard?.commissionRatePercent != null ? referralDashboard.commissionRatePercent : '1'}%
+                                                    </span>
+                                                </h3>
+                                                <p className="text-[11px] text-white/50">
+                                                    {language === 'am'
+                                                        ? 'ጓደኛዎ ባሸነፉ ቁጥር 1% ኮሚሽን ወዲያውኑ ወደ ዋሌትዎ ገቢ ይሆናል (ከአሸናፊው አይቀነስም)'
+                                                        : 'Earn 1% on every winning payout your invited friends take home for life (100% platform funded)'}
+                                                </p>
+                                            </div>
                                         </div>
+
+                                        <button
+                                            type="button"
+                                            onClick={fetchReferralDashboard}
+                                            className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-white transition"
+                                            title="Refresh Referral Data"
+                                        >
+                                            <svg className={referralLoading ? "animate-spin" : ""} xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+                                        </button>
+                                    </div>
+
+                                    {/* Referral Wallet Card with Quick Payout */}
+                                    <div className="bg-gradient-to-r from-indigo-950/60 via-surface-900 to-black/70 border border-indigo-500/30 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-lg">
                                         <div>
-                                            <h4 className="text-xs sm:text-sm font-bold text-white">
-                                                {t('inviteCodeQuestion')}
-                                            </h4>
-                                            <p className="text-[10px] sm:text-[11px] text-white/50">
-                                                {t('inviteCodeDesc')}
-                                            </p>
+                                            <div className="text-[10.5px] font-bold text-indigo-300 uppercase tracking-wider mb-0.5">
+                                                {language === 'am' ? 'ያልወጣ የኮሚሽን ቀሪ ሂሳብ' : 'Unwithdrawn Referral Balance'}
+                                            </div>
+                                            <div className="text-2xl sm:text-3xl font-black text-white font-mono tracking-tight">
+                                                {Number(user?.referralBalance || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                <span className="text-xs text-indigo-400 font-bold ml-1">ETB</span>
+                                            </div>
+                                            <div className="text-[10px] text-white/40 mt-1">
+                                                {language === 'am' ? 'ጠቅላላ የተገኘ ገቢ:' : 'Lifetime Earned:'}{' '}
+                                                <strong className="text-white/80 font-mono">
+                                                    {Number(referralDashboard?.stats?.totalCommissionEarned ?? inviteStats.referralEarnings).toLocaleString(undefined, { minimumFractionDigits: 2 })} ETB
+                                                </strong>
+                                            </div>
+                                        </div>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setActiveTab('wallet');
+                                                setWalletTabState(prev => ({ ...prev, active: 'withdraw', walletType: 'referral', amount: '' }));
+                                            }}
+                                            className="px-3.5 py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 active:scale-95 text-white font-black text-xs transition shadow-md shadow-indigo-500/25 flex items-center gap-1.5 shrink-0"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" x2="12" y1="3" y2="15" /></svg>
+                                            <span>{language === 'am' ? 'ወደ ቴሌብር አውጣ' : 'Withdraw Funds'}</span>
+                                        </button>
+                                    </div>
+
+                                    {/* Invite Code & Direct Sharing Buttons */}
+                                    <div className="bg-black/40 border border-white/5 rounded-2xl p-3.5 space-y-3">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-white/50 text-[11px] font-bold uppercase tracking-wider">
+                                                {language === 'am' ? 'የእርስዎ ልዩ የግብዣ ኮድ' : 'Your Unique Invite Code'}
+                                            </span>
+                                            <div className="flex items-center gap-1.5">
+                                                <span className="font-mono font-extrabold text-sm text-equb-400 bg-equb-500/10 px-2.5 py-1 rounded-lg border border-equb-500/30">
+                                                    {userInviteCode}
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        navigator.clipboard.writeText(userInviteCode);
+                                                        showToast(language === 'am' ? 'የግብዣ ኮድ ተቀድቷል!' : 'Invite code copied!');
+                                                    }}
+                                                    className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-white/70 hover:text-white transition"
+                                                    title="Copy Code"
+                                                >
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></svg>
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex items-center gap-2">
+                                            <input
+                                                type="text"
+                                                readOnly
+                                                value={userInviteLink}
+                                                onClick={(e) => e.target.select()}
+                                                className="flex-1 min-w-0 bg-black/60 border border-white/10 rounded-xl px-3 py-2 text-xs font-mono text-white/80 focus:outline-none"
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    navigator.clipboard.writeText(userInviteLink);
+                                                    showToast(t('inviteLinkCopied'));
+                                                }}
+                                                className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/10 text-white text-xs font-bold whitespace-nowrap transition active:scale-95"
+                                            >
+                                                {t('copyLinkBtn')}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={handleTelegramShare}
+                                                className="px-3 py-2 rounded-xl bg-[#229ED9] hover:bg-[#1E88C7] text-white text-xs font-bold whitespace-nowrap transition active:scale-95 flex items-center gap-1.5 shadow-sm"
+                                                title="Share to Telegram"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+                                                <span>Telegram</span>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={handleShareInviteLink}
+                                                className="px-3 py-2 rounded-xl bg-gold-500 hover:bg-gold-400 text-black text-xs font-extrabold whitespace-nowrap transition active:scale-95"
+                                            >
+                                                {t('shareLinkBtn')}
+                                            </button>
                                         </div>
                                     </div>
 
-                                    <form onSubmit={handleApplyInviteCode} className="flex gap-2">
-                                        <div className="relative flex-1">
-                                            <input
-                                                type="text"
-                                                value={inviteCodeInput}
-                                                onChange={(e) => setInviteCodeInput(e.target.value.toUpperCase())}
-                                                placeholder="e.g. EQUB-WIN77"
-                                                disabled={appliedInvite || inviteLoading}
-                                                className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 sm:py-2.5 text-xs sm:text-sm font-mono font-bold text-white uppercase placeholder-white/25 focus:outline-none focus:border-equb-500 transition disabled:opacity-60"
-                                            />
-                                            {appliedInvite && (
-                                                <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] font-bold text-emerald-400 flex items-center gap-1">
-                                                    ✓ {t('inviteCodeApplied')}
-                                                </span>
-                                            )}
-                                        </div>
+                                    {/* Navigation Tabs for Referral Hub */}
+                                    <div className="flex bg-black/50 p-1 rounded-xl border border-white/10 gap-1 text-xs font-bold">
                                         <button
-                                            type="submit"
-                                            disabled={appliedInvite || inviteLoading || !inviteCodeInput.trim()}
-                                            className="px-4 py-2 sm:py-2.5 rounded-xl bg-equb-500 hover:bg-equb-400 active:scale-95 disabled:opacity-40 text-black font-extrabold text-xs uppercase transition shadow-sm whitespace-nowrap"
+                                            type="button"
+                                            onClick={() => setReferralViewTab('overview')}
+                                            className={`flex-1 py-1.5 rounded-lg transition ${referralViewTab === 'overview' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-sm' : 'text-white/50 hover:text-white'}`}
                                         >
-                                            {inviteLoading ? '...' : appliedInvite ? (t('appliedLabel')) : (t('applyBtn'))}
+                                            {language === 'am' ? 'ታሪክ' : 'Commissions'} ({referralDashboard?.commissionHistory?.length || 0})
                                         </button>
-                                    </form>
+                                        <button
+                                            type="button"
+                                            onClick={() => setReferralViewTab('friends')}
+                                            className={`flex-1 py-1.5 rounded-lg transition ${referralViewTab === 'friends' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-sm' : 'text-white/50 hover:text-white'}`}
+                                        >
+                                            {language === 'am' ? 'ጓደኞች' : 'Friends'} ({referralDashboard?.invitedPlayers?.length || referralDashboard?.stats?.totalInvited || inviteStats.totalInvites || 0})
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setReferralViewTab('apply')}
+                                            className={`flex-1 py-1.5 rounded-lg transition ${referralViewTab === 'apply' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-sm' : 'text-white/50 hover:text-white'}`}
+                                        >
+                                            {appliedInvite ? '✓ ' + (language === 'am' ? 'የተገናኘ ኮድ' : 'Linked Code') : (language === 'am' ? 'ኮድ አስገባ' : 'Have a Code?')}
+                                        </button>
+                                    </div>
 
-                                    {inviteMessage && (
-                                        <div className={`p-2.5 rounded-xl text-xs font-medium border flex items-center gap-2 ${inviteMessage.type === 'success'
-                                                ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-300'
-                                                : 'bg-red-950/40 border-red-500/30 text-red-300'
-                                            }`}>
-                                            <span>{inviteMessage.type === 'success' ? '🎉' : '⚠️ '}</span>
-                                            <span>{inviteMessage.text}</span>
+                                    {/* SUB-VIEW 1: COMMISSIONS HISTORY */}
+                                    {referralViewTab === 'overview' && (
+                                        <div className="space-y-2">
+                                            {(!referralDashboard?.commissionHistory || referralDashboard.commissionHistory.length === 0) ? (
+                                                <div className="p-6 text-center text-white/40 bg-black/20 rounded-xl border border-white/5 space-y-1">
+                                                    <div className="text-2xl mb-1">🎁</div>
+                                                    <div className="text-xs font-bold text-white/70">
+                                                        {language === 'am' ? 'እስካሁን ምንም የኮሚሽን ገቢ የለም' : 'No referral commissions yet'}
+                                                    </div>
+                                                    <div className="text-[11px] text-white/40">
+                                                        {language === 'am'
+                                                            ? 'የጋበዟቸው ጓደኞች በጨዋታ ባሸነፉ ቁጥር 1% ኮሚሽን እዚህ ይታያል!'
+                                                            : 'When your invited friends win games, your 1% rewards will show here instantly!'}
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                                                    {referralDashboard.commissionHistory.map(comm => (
+                                                        <div key={comm.id} className="p-2.5 rounded-xl bg-black/40 border border-white/5 flex items-center justify-between text-xs">
+                                                            <div className="min-w-0">
+                                                                <div className="flex items-center gap-1.5">
+                                                                    <span className="font-bold text-white truncate">
+                                                                        {comm.referred_name || 'Friend'}
+                                                                    </span>
+                                                                    <span className="text-white/40 text-[10px]">
+                                                                        #{comm.room_number || '-'}
+                                                                    </span>
+                                                                    <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold uppercase ${comm.status === 'credited' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-red-500/20 text-red-300 border border-red-500/30'}`}>
+                                                                        {comm.status}
+                                                                    </span>
+                                                                </div>
+                                                                <div className="text-white/40 text-[10px] mt-0.5">
+                                                                    {new Date(comm.created_at).toLocaleDateString()} {new Date(comm.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • Won: {Number(comm.winning_amount).toLocaleString()} ETB
+                                                                </div>
+                                                            </div>
+
+                                                            <div className="text-right shrink-0">
+                                                                <div className={`font-mono font-black text-sm ${comm.status === 'credited' ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                                    {comm.status === 'credited' ? '+' : '-'}{Number(comm.commission_amount).toFixed(2)} ETB
+                                                                </div>
+                                                                <div className="text-[9.5px] text-white/40 font-semibold">
+                                                                    {(Number(comm.commission_rate) * 100).toFixed(0)}% bonus
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
                                         </div>
                                     )}
 
-                                    {user && (
-                                        <div className="pt-3 border-t border-white/10 space-y-3 text-xs">
-                                            <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/25 px-3 py-2 text-[11px] font-semibold text-emerald-300 flex items-center gap-2">
-                                                <span>💸</span>
-                                                <span>{t('inviteSenderRewardDesc')}</span>
-                                            </div>
-
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-white/50 text-[11px]">
-                                                    {t('yourInviteCode')}
-                                                </span>
-                                                <div className="flex items-center gap-1.5">
-                                                    <span className="font-mono font-bold text-equb-400 bg-equb-500/10 px-2 py-0.5 rounded-md border border-equb-500/20 text-xs">
-                                                        {userInviteCode}
-                                                    </span>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => {
-                                                            navigator.clipboard.writeText(userInviteCode);
-                                                            showToast(t('inviteCodeCopied'));
-                                                        }}
-                                                        className="text-white/60 hover:text-white p-1 hover:bg-white/10 rounded-md transition"
-                                                        title="Copy Code"
-                                                    >
-                                                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></svg>
-                                                    </button>
+                                    {/* SUB-VIEW 2: INVITED FRIENDS */}
+                                    {referralViewTab === 'friends' && (
+                                        <div className="space-y-2">
+                                            {(!referralDashboard?.invitedPlayers || referralDashboard.invitedPlayers.length === 0) ? (
+                                                <div className="p-6 text-center text-white/40 bg-black/20 rounded-xl border border-white/5 space-y-1">
+                                                    <div className="text-2xl mb-1">👥</div>
+                                                    <div className="text-xs font-bold text-white/70">
+                                                        {language === 'am' ? 'እስካሁን ምንም ጓደኛ አልተጋበዘም' : 'No friends joined yet'}
+                                                    </div>
+                                                    <div className="text-[11px] text-white/40">
+                                                        {language === 'am'
+                                                            ? 'የእርስዎን የግብዣ ሊንክ ለጓደኞችዎ ያጋሩ!'
+                                                            : 'Share your invite link above with friends to start earning lifetime commissions!'}
+                                                    </div>
                                                 </div>
+                                            ) : (
+                                                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                                                    {referralDashboard.invitedPlayers.map(friend => (
+                                                        <div key={friend.id} className="p-2.5 rounded-xl bg-black/40 border border-white/5 flex items-center justify-between text-xs">
+                                                            <div>
+                                                                <div className="font-bold text-white">
+                                                                    {friend.display_name}
+                                                                </div>
+                                                                <div className="text-white/40 text-[10px] mt-0.5">
+                                                                    Joined {new Date(friend.joined_at).toLocaleDateString()} • {friend.games_played || 0} games played
+                                                                </div>
+                                                            </div>
+
+                                                            <div className="text-right">
+                                                                <div className="text-emerald-400 font-mono font-bold text-xs">
+                                                                    +{Number(friend.total_commissions_generated || 0).toFixed(2)} ETB
+                                                                </div>
+                                                                <div className="text-[9.5px] text-white/40">Generated</div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* SUB-VIEW 3: APPLY INVITER CODE */}
+                                    {referralViewTab === 'apply' && (
+                                        <div className="bg-black/30 p-3.5 rounded-xl border border-white/5 space-y-3">
+                                            <div>
+                                                <h4 className="text-xs font-bold text-white">
+                                                    {appliedInvite ? (language === 'am' ? 'የተገናኘ የግብዣ ኮድ' : 'Linked Inviter Code') : t('inviteCodeQuestion')}
+                                                </h4>
+                                                <p className="text-[10.5px] text-white/50">
+                                                    {appliedInvite
+                                                        ? (language === 'am' ? 'መለያዎ ከጋባዥዎ ጋር በቋሚነት ተገናኝቷል።' : 'Your account is permanently linked to your inviter.')
+                                                        : t('inviteCodeDesc')}
+                                                </p>
                                             </div>
 
-                                            <div className="space-y-1.5">
-                                                <div className="text-white/50 text-[11px]">{t('yourInviteLink')}</div>
-                                                <div className="flex items-center gap-2">
+                                            <form onSubmit={handleApplyInviteCode} className="flex gap-2">
+                                                <div className="relative flex-1">
                                                     <input
                                                         type="text"
-                                                        readOnly
-                                                        value={userInviteLink}
-                                                        onClick={(e) => e.target.select()}
-                                                        className="flex-1 min-w-0 bg-black/40 border border-white/10 rounded-xl px-2.5 py-2 text-[11px] font-mono text-white/80 focus:outline-none"
+                                                        value={inviteCodeInput}
+                                                        onChange={(e) => setInviteCodeInput(e.target.value.toUpperCase())}
+                                                        placeholder="e.g. EQUB-WIN77"
+                                                        disabled={appliedInvite || inviteLoading}
+                                                        className="w-full bg-black/60 border border-white/10 rounded-xl px-3 py-2 text-xs sm:text-sm font-mono font-bold text-white uppercase placeholder-white/25 focus:outline-none focus:border-equb-500 transition disabled:opacity-60"
                                                     />
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => {
-                                                            navigator.clipboard.writeText(userInviteLink);
-                                                            showToast(t('inviteLinkCopied'));
-                                                        }}
-                                                        className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/10 text-white text-[11px] font-bold whitespace-nowrap transition active:scale-95"
-                                                    >
-                                                        {t('copyLinkBtn')}
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        onClick={handleShareInviteLink}
-                                                        className="px-3 py-2 rounded-xl bg-gold-500 hover:bg-gold-400 text-black text-[11px] font-extrabold whitespace-nowrap transition active:scale-95"
-                                                    >
-                                                        {t('shareLinkBtn')}
-                                                    </button>
+                                                    {appliedInvite && (
+                                                        <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] font-bold text-emerald-400 flex items-center gap-1">
+                                                            ✓ {t('inviteCodeApplied')}
+                                                        </span>
+                                                    )}
                                                 </div>
-                                            </div>
+                                                <button
+                                                    type="submit"
+                                                    disabled={appliedInvite || inviteLoading || !inviteCodeInput.trim()}
+                                                    className="px-4 py-2 rounded-xl bg-equb-500 hover:bg-equb-400 active:scale-95 disabled:opacity-40 text-black font-extrabold text-xs uppercase transition shadow-sm whitespace-nowrap"
+                                                >
+                                                    {inviteLoading ? '...' : appliedInvite ? (t('appliedLabel')) : (t('applyBtn'))}
+                                                </button>
+                                            </form>
+
+                                            {inviteMessage && (
+                                                <div className={`p-2.5 rounded-xl text-xs font-medium border flex items-center gap-2 ${inviteMessage.type === 'success'
+                                                        ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-300'
+                                                        : 'bg-red-950/40 border-red-500/30 text-red-300'
+                                                    }`}>
+                                                    <span>{inviteMessage.type === 'success' ? '🎉' : '⚠️ '}</span>
+                                                    <span>{inviteMessage.text}</span>
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                 </div>

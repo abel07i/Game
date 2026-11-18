@@ -10,6 +10,7 @@ const db = require('./src/db');
 const walletLedger = require('./src/walletLedger');
 const roomManager = require('./src/roomManager');
 const adminRoutes = require('./src/adminRoutes');
+const referralManager = require('./src/referralManager');
 const { generateToken, verifyToken, hashPassword, verifyPassword } = require('./src/adminAuth');
 const { isValidUuid, createRateLimiter, securityHeaders, urlIntegrityGuard, openRedirectGuard, sanitizeText, sanitizePhone, sanitizeDisplayName, verifyTelebirrReceiver } = require('./src/security');
 
@@ -40,13 +41,13 @@ app.use(openRedirectGuard);
 // Rate limiters for auth & financial routes
 const loginLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
-  max: 15,
+  max: process.env.NODE_ENV === 'test' ? 1000 : 15,
   keyGenerator: (req) => `${req.ip}:login:${String(req.body?.phoneNumber || '').trim()}`,
   message: 'Too many login attempts. Please try again in a few minutes.'
 });
 const registerLimiter = createRateLimiter({
   windowMs: 60 * 60 * 1000,
-  max: 10,
+  max: process.env.NODE_ENV === 'test' ? 1000 : 25,
   message: 'Too many registration attempts from this IP.'
 });
 const forgotPwLimiter = createRateLimiter({
@@ -369,9 +370,9 @@ app.post('/api/v1/auth/register', registerLimiter, async (req, res) => {
     const ownInviteCode = `EQUB-${String(userId).slice(0, 6).toUpperCase()}`;
     await client.query(`UPDATE users SET invite_code = $1 WHERE id = $2`, [ownInviteCode, userId]);
 
-    // Auto-create wallet with 0 balance inside transaction
+    // Auto-create real, demo, and referral wallets with 0 balance inside transaction
     await client.query(
-      `INSERT INTO wallets (user_id, mode, balance) VALUES ($1, 'real', 0) ON CONFLICT (user_id, mode) DO NOTHING`,
+      `INSERT INTO wallets (user_id, mode, balance) VALUES ($1, 'real', 0), ($1, 'demo', 0), ($1, 'referral', 0) ON CONFLICT (user_id, mode) DO NOTHING`,
       [userId]
     );
     let balance = 0;
@@ -711,10 +712,12 @@ app.get('/api/v1/user/invite', playerMiddleware, async (req, res) => {
   try {
     const userId = req.playerId;
 
-    const [userRes, existingRes, statsRes] = await Promise.all([
+    const [userRes, existingRes, statsRes, refWalRes, commRate] = await Promise.all([
       db.query('SELECT invite_code FROM users WHERE id = $1', [userId]),
       db.query('SELECT invite_code, bonus_amount FROM user_invites WHERE user_id = $1', [userId]),
-      db.query('SELECT COUNT(*)::int AS total_invites FROM user_invites WHERE referrer_id = $1', [userId])
+      db.query('SELECT COUNT(*)::int AS total_invites, COALESCE(SUM(total_commissions_earned), 0)::float AS lifetime_commissions FROM user_invites WHERE referrer_id = $1', [userId]),
+      referralManager.ensureReferralWallet(db, userId),
+      referralManager.getCommissionRate()
     ]);
 
     const ownInviteCode = formatOwnInviteCode(userId, userRes.rows[0]?.invite_code);
@@ -730,10 +733,43 @@ app.get('/api/v1/user/invite', playerMiddleware, async (req, res) => {
       totalInvites,
       referralEarnings,
       senderReward: SENDER_REFERRAL_REWARD,
-      welcomeBonus: RECEIVER_INVITE_BONUS
+      welcomeBonus: RECEIVER_INVITE_BONUS,
+      referralWalletBalance: parseFloat(refWalRes?.balance || 0),
+      lifetimeCommissions: parseFloat(statsRes.rows[0]?.lifetime_commissions || 0),
+      commissionRate: commRate,
+      commissionRatePercent: Math.round(commRate * 1000) / 10
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load invite details' });
+  }
+});
+
+// ── Advanced Lifetime Referral Commission Routes ─────────────────────────────
+
+app.get('/api/v1/referral/dashboard', playerMiddleware, async (req, res) => {
+  try {
+    const dashboard = await referralManager.getReferralDashboard(req.playerId);
+    res.json(dashboard);
+  } catch (err) {
+    console.error('Referral dashboard error:', err);
+    res.status(500).json({ error: err.message || 'Failed to load referral dashboard' });
+  }
+});
+
+app.post('/api/v1/referral/withdraw', playerMiddleware, walletLimiter, async (req, res) => {
+  try {
+    const { amount, phoneNumber, paymentMethod = 'telebirr', accountHolderName } = req.body || {};
+    const result = await referralManager.withdrawReferralWallet({
+      userId: req.playerId,
+      amount,
+      phoneNumber,
+      paymentMethod,
+      accountHolderName
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('Referral withdraw error:', err);
+    res.status(400).json({ error: err.message || 'Failed to process referral withdrawal' });
   }
 });
 
@@ -798,8 +834,11 @@ app.get('/api/v1/config', async (req, res) => {
 app.get('/api/v1/wallet/balance', playerMiddleware, async (req, res) => {
   try {
     const userId = req.playerId;
-    const balance = await walletLedger.getBalance(userId, 'real');
-    res.json({ balance });
+    const [balance, referralBalance] = await Promise.all([
+      walletLedger.getBalance(userId, 'real'),
+      walletLedger.getBalance(userId, 'referral')
+    ]);
+    res.json({ balance, referralBalance });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch balance' });
   }
@@ -937,7 +976,20 @@ app.post('/api/v1/wallet/withdraw', playerMiddleware, walletLimiter, async (req,
   const client = await db.getClient();
   try {
     const userId = req.playerId;
-    const { amount, phoneNumber: rawPayPhone, paymentMethod: rawPayMethod = 'telebirr', accountHolderName: rawHolderName } = req.body;
+    const { amount, phoneNumber: rawPayPhone, paymentMethod: rawPayMethod = 'telebirr', accountHolderName: rawHolderName, walletType = 'real' } = req.body || {};
+
+    // If withdrawing specifically from the referral commission wallet
+    if (walletType === 'referral') {
+      const refResult = await referralManager.withdrawReferralWallet({
+        userId,
+        amount,
+        phoneNumber: rawPayPhone,
+        paymentMethod: rawPayMethod,
+        accountHolderName: rawHolderName
+      });
+      return res.json(refResult);
+    }
+
     const mode = 'real'; // Withdrawals strictly in real money mode
 
     // Validate payment method (allowlist only)
@@ -1040,9 +1092,9 @@ app.post('/api/v1/wallet/withdraw', playerMiddleware, walletLimiter, async (req,
 
     // Insert withdrawal request linked directly to transaction
     const reqRes = await client.query(
-      `INSERT INTO withdrawal_requests (user_id, amount, phone_number, status, transaction_id, payment_method, account_holder_name)
-       VALUES ($1, $2, $3, 'pending', $4, $5, $6)
-       RETURNING id, amount, phone_number, status, payment_method, account_holder_name, created_at`,
+      `INSERT INTO withdrawal_requests (user_id, amount, phone_number, status, transaction_id, payment_method, account_holder_name, wallet_type)
+       VALUES ($1, $2, $3, 'pending', $4, $5, $6, 'real')
+       RETURNING id, amount, phone_number, status, payment_method, account_holder_name, wallet_type, created_at`,
       [userId, withdrawAmount, phone, txId, paymentMethod, accountHolderName ? sanitizeText(String(accountHolderName), 100) : null]
     );
     const newRequest = reqRes.rows[0];
@@ -1071,7 +1123,7 @@ app.get('/api/v1/wallet/withdrawals', playerMiddleware, async (req, res) => {
     const userId = req.playerId;
     const result = await db.query(
       `SELECT 
-         id, amount, phone_number, status, payment_method, account_holder_name, notes, created_at, updated_at
+         id, amount, phone_number, status, payment_method, account_holder_name, notes, wallet_type, created_at, updated_at
        FROM withdrawal_requests 
        WHERE user_id = $1 
        ORDER BY created_at DESC 
@@ -1135,11 +1187,12 @@ app.post('/api/v1/wallet/withdraw/:id/cancel', playerMiddleware, walletLimiter, 
     }
 
     const refundAmount = parseFloat(request.amount);
+    const walletMode = request.wallet_type === 'referral' ? 'referral' : 'real';
 
     // Atomically refund wallet balance via stored procedure
     const refundRes = await client.query(
-      `SELECT * FROM fn_wallet_refund($1, $2, 'real', $3)`,
-      [userId, refundAmount, `Withdrawal #${id.slice(0, 8)} cancelled by player`]
+      `SELECT * FROM fn_wallet_refund($1, $2, $3, $4)`,
+      [userId, refundAmount, walletMode, `Withdrawal #${id.slice(0, 8)} cancelled by player`]
     );
 
     if (!refundRes.rows[0]?.success) {
@@ -1430,6 +1483,13 @@ io.on('connection', (socket) => {
       socket.leave(`room_${payload.roomId}`);
     }
   });
+
+  // Allow authenticated players to join their personal user channel for real-time commission & payout alerts
+  socket.on('user:subscribe', (payload) => {
+    if (payload && payload.userId && isValidUuid(payload.userId)) {
+      socket.join(`user_${payload.userId}`);
+    }
+  });
 });
 
 // ── Boot Sequence ─────────────────────────────────────────────────────────────
@@ -1456,6 +1516,7 @@ app.use((req, res, next) => {
 server.listen(PORT, async () => {
   console.log(`🚀 Fast Derash server starting on port ${PORT}...`);
   try {
+    await referralManager.initSchema();
     await roomManager.loadActiveRooms();
     await roomManager.ensureStarterRooms();
     console.log('✅ System fully operational and synced with PostgreSQL.');

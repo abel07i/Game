@@ -247,6 +247,17 @@ class RoomManager {
       // Refund all players atomically
       await db.query('SELECT * FROM fn_refund_room($1)', [roomId]);
       await db.query(`UPDATE rooms SET status = 'refunded' WHERE id = $1`, [roomId]);
+
+      // Automatically reverse any referral commissions if room was cancelled
+      const referralManager = require('./referralManager');
+      await referralManager.reverseCommissionsForRoom({
+        client: db,
+        roomId,
+        roomNumber: room.roomNumber,
+        reason: 'Room cancelled & refunded by admin',
+        io: this.io
+      }).catch(err => console.error('Failed to reverse referral commissions on delete:', err));
+
       if (this.io) {
         this.io.emit('room:refunded', { roomId, reason: 'Room cancelled & refunded by admin' });
       }
@@ -429,6 +440,23 @@ class RoomManager {
       const settlement = settleRes.rows[0];
       if (!settlement.success) {
         throw new Error(settlement.error_message || 'Settlement failed');
+      }
+
+      // Automatically award 1% lifetime referral commission to winner's inviter (if any)
+      // Note: Winner receives their full 100% net winnings; commission is paid by platform.
+      const referralManager = require('./referralManager');
+      try {
+        await referralManager.processWinningSettlementCommission({
+          client: db,
+          roomId,
+          winnerTicketId: winnerTicket.id,
+          winnerUserId: winnerTicket.userId,
+          netPayout: parseFloat(settlement.net_payout_out),
+          roomNumber: room.roomNumber,
+          io: this.io
+        });
+      } catch (refErr) {
+        console.error(`❌ Failed to process referral commission for game #${room.roomNumber}:`, refErr);
       }
 
       // Persist provably fair seeds for auditability

@@ -9,6 +9,7 @@ import Games from "./pages/Games";
 import GameDetail from "./pages/GameDetail";
 import Transactions from "./pages/Transactions";
 import Withdrawals from "./pages/Withdrawals";
+import Referrals from "./pages/Referrals";
 import Profit from "./pages/Profit";
 import Reports from "./pages/Reports";
 import Settings from "./pages/Settings";
@@ -40,6 +41,7 @@ export default function App() {
             <Route index element={<Dashboard />} />
             <Route path="players" element={<Players />} />
             <Route path="players/:id" element={<PlayerDetail />} />
+            <Route path="referrals" element={<Referrals />} />
             <Route path="games" element={<Games />} />
             <Route path="games/:id" element={<GameDetail />} />
             <Route path="transactions" element={<Transactions />} />

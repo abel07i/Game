@@ -2,7 +2,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import {
   LayoutDashboard, Users, Gamepad2, ArrowLeftRight,
-  TrendingUp, FileText, Settings, LogOut, DollarSign
+  TrendingUp, FileText, Settings, LogOut, DollarSign, Share2
 } from "lucide-react";
 
 const navItems = [
@@ -10,6 +10,7 @@ const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { section: "Management" },
   { to: "/players", label: "Players", icon: Users },
+  { to: "/referrals", label: "Referrals", icon: Share2 },
   { to: "/games", label: "Games", icon: Gamepad2 },
   { to: "/transactions", label: "Transactions", icon: ArrowLeftRight },
   { section: "Finance" },

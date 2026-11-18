@@ -68,6 +68,7 @@ export default function Withdrawals() {
   const [withdrawals, setWithdrawals] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("pending"); // default to pending for admin focus
+  const [walletFilter, setWalletFilter] = useState("all"); // 'all' | 'real' | 'referral'
   const [search, setSearch] = useState("");
   
   // Selection state for bulk actions
@@ -404,6 +405,12 @@ export default function Withdrawals() {
       // Status filter
       if (filter !== "all" && w.status !== filter) return false;
 
+      // Wallet type filter
+      if (walletFilter !== "all") {
+        const itemWalletType = w.wallet_type === "referral" ? "referral" : "real";
+        if (itemWalletType !== walletFilter) return false;
+      }
+
       // Search filter
       if (search.trim()) {
         const q = search.toLowerCase();
@@ -604,6 +611,19 @@ export default function Withdrawals() {
               >
                 All Requests ({stats.totalCount})
               </button>
+
+              {/* Wallet Type Filter */}
+              <select
+                className="form-select"
+                value={walletFilter}
+                onChange={e => setWalletFilter(e.target.value)}
+                style={{ width: 145, fontSize: 13, padding: "5px 10px" }}
+                title="Filter by Wallet Source"
+              >
+                <option value="all">All Wallets</option>
+                <option value="real">Game Wallet</option>
+                <option value="referral">Referral Wallet</option>
+              </select>
             </div>
 
             {/* Search input */}
@@ -760,7 +780,7 @@ export default function Withdrawals() {
                               </Link>
                               {w.user_balance !== undefined && (
                                 <div className="text-muted text-xs">
-                                  Bal: {parseFloat(w.user_balance).toLocaleString()} ETB
+                                  Bal: {parseFloat(w.user_balance).toLocaleString()} ETB ({w.wallet_type === 'referral' ? 'Referral' : 'Game'})
                                 </div>
                               )}
                             </div>
@@ -804,6 +824,17 @@ export default function Withdrawals() {
                                 <Copy size={14} />
                               )}
                             </button>
+                          </div>
+                          <div style={{ marginTop: 2 }}>
+                            {w.wallet_type === 'referral' ? (
+                              <span className="badge" style={{ background: "rgba(99,102,241,0.18)", color: "var(--accent)", border: "1px solid rgba(99,102,241,0.4)", fontSize: 10, padding: "1px 6px" }}>
+                                Referral Wallet
+                              </span>
+                            ) : (
+                              <span className="badge" style={{ background: "rgba(255,255,255,0.06)", color: "var(--text-muted)", fontSize: 10, padding: "1px 6px" }}>
+                                Game Wallet
+                              </span>
+                            )}
                           </div>
                         </td>
 

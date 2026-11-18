@@ -51,6 +51,8 @@ export default function Settings() {
 
   // Platform fee state
   const [platformFeeInput, setPlatformFeeInput] = useState("");
+  // Lifetime referral commission rate state
+  const [referralRateInput, setReferralRateInput] = useState("1.0");
 
   // Telebirr state
   const [paymentConfig, setPaymentConfig] = useState({ phone: "", name: "", apiKey: "" });
@@ -74,6 +76,7 @@ export default function Settings() {
         if (meRes) setCurrentAdmin(meRes);
         if (setRes) {
           setPlatformFeeInput((setRes.platformFee * 100).toString());
+          setReferralRateInput(setRes.referralCommissionRatePercent != null ? setRes.referralCommissionRatePercent.toString() : (setRes.referralCommissionRate != null ? (setRes.referralCommissionRate * 100).toString() : '1.0'));
           setPaymentConfig({
             phone: setRes.telebirrPhone || '',
             name: setRes.telebirrName || '',
@@ -336,6 +339,27 @@ export default function Settings() {
     });
   };
 
+  const handleUpdateReferralRate = (e) => {
+    e.preventDefault();
+    const rateVal = parseFloat(referralRateInput) / 100;
+    if (isNaN(rateVal) || rateVal < 0 || rateVal > 0.50) {
+      alert("Invalid referral commission percentage (must be between 0% and 50%)");
+      return;
+    }
+    setError("");
+    openStepUpModal({
+      title: "Update Lifetime Referral Commission Rate",
+      description: `Change default lifetime referral commission to ${(rateVal * 100).toFixed(1)}% of eligible winning payouts? (Platform pays this bonus)`,
+      confirmLabel: "Update Commission Rate",
+      onConfirm: async (confirmPassword) => {
+        await api.updateSettings({ referralCommissionRate: rateVal, confirmPassword });
+        setMessage("Referral commission rate updated successfully!");
+        fetchSettings();
+        setTimeout(() => setMessage(""), 5000);
+      }
+    });
+  };
+
   if (loading) return <div className="loading-overlay"><div className="spinner"></div></div>;
 
   return (
@@ -455,6 +479,51 @@ export default function Settings() {
              Update Fee
           </button>
         </form>
+
+        {/* Lifetime Referral Commission Form */}
+        <div style={{ borderTop: '1px solid var(--border)', paddingTop: 32, marginBottom: 32 }}>
+          <h3 style={{ fontWeight: 600, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+            <Users size={18} color="var(--success)"/> Lifetime Referral Commission
+          </h3>
+          <p style={{ color: "var(--text-muted)", fontSize: 14, marginBottom: 20 }}>
+            Configure the percentage commission paid automatically by the platform to the inviter whenever a referred player wins an eligible game. The winner receives 100% of their net payout; this commission is funded entirely by the platform.
+          </p>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginBottom: 16 }}>
+            <div style={{ padding: 16, borderRadius: "var(--radius-sm)", background: 'var(--bg-glass)', border: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 4 }}>Current Commission Rate</div>
+              <div style={{ fontSize: 24, fontWeight: 800, color: "var(--accent)" }}>
+                {data.settings?.referralCommissionRatePercent != null ? data.settings.referralCommissionRatePercent : (data.settings?.referralCommissionRate ? (data.settings.referralCommissionRate * 100).toFixed(1) : "1.0")}%
+              </div>
+            </div>
+            <div style={{ padding: 16, borderRadius: "var(--radius-sm)", background: 'var(--bg-glass)', border: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 4 }}>Platform Funding Model</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--success)", marginTop: 6 }}>100% Platform Funded</div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>Zero deduction from winner payout</div>
+            </div>
+          </div>
+
+          <form onSubmit={handleUpdateReferralRate} style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <div style={{ flex: '1 1 200px' }}>
+              <label style={{ fontSize: 13, marginBottom: 4, display: "block", color: "var(--text-secondary)" }}>
+                New Commission Rate (%) (0.0% – 50.0%)
+              </label>
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                max="50"
+                className="form-input"
+                required
+                value={referralRateInput}
+                onChange={e => setReferralRateInput(e.target.value)}
+              />
+            </div>
+            <button type="submit" className="btn btn-primary" style={{ padding: "11px 20px" }}>
+              Update Commission Rate
+            </button>
+          </form>
+        </div>
 
         {/* Payment Settings Form */}
         <div style={{ borderTop: '1px solid var(--border)', paddingTop: 32, marginBottom: 32 }}>

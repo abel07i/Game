@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('./db');
 const { hashPassword, verifyPassword, generateToken, adminMiddleware } = require('./adminAuth');
 const { isValidUuid, createRateLimiter, sanitizeText, sanitizePhone, sanitizeDisplayName, openRedirectGuard } = require('./security');
+const referralManager = require('./referralManager');
 
 // Apply open-redirect guard to all admin routes
 router.use(openRedirectGuard);
@@ -160,9 +161,10 @@ async function applyWithdrawalDecisions({ client, items, status, adminId, adminU
         throw new Error('Invalid withdrawal refund amount');
       }
       const refundNote = trimmedNotes ? `Withdrawal rejected: ${trimmedNotes}` : 'Withdrawal rejected/refunded by Admin';
+      const walletMode = reqItem.wallet_type === 'referral' ? 'referral' : 'real';
       const refundRes = await client.query(
-        `SELECT * FROM fn_wallet_refund($1, $2, 'real', $3)`,
-        [reqItem.user_id, refundAmount, refundNote]
+        `SELECT * FROM fn_wallet_refund($1, $2, $3, $4)`,
+        [reqItem.user_id, refundAmount, walletMode, refundNote]
       );
       if (!refundRes.rows[0]?.success) {
         throw new Error('Failed to refund user balance');
@@ -223,9 +225,10 @@ async function deleteWithdrawalsWithAudit({ client, ids, refundPending, adminId,
     if (!Number.isFinite(refundAmount) || refundAmount <= 0) {
       throw new Error('Invalid withdrawal refund amount');
     }
+    const walletMode = reqItem.wallet_type === 'referral' ? 'referral' : 'real';
     const refundRes = await client.query(
-      `SELECT * FROM fn_wallet_refund($1, $2, 'real', $3)`,
-      [reqItem.user_id, refundAmount, `Withdrawal #${reqItem.id.slice(0, 8)} deleted & refunded by Admin`]
+      `SELECT * FROM fn_wallet_refund($1, $2, $3, $4)`,
+      [reqItem.user_id, refundAmount, walletMode, `Withdrawal #${reqItem.id.slice(0, 8)} deleted & refunded by Admin`]
     );
     if (!refundRes.rows[0]?.success) {
       throw new Error('Failed to refund user balance before deletion');
@@ -967,6 +970,15 @@ router.post('/games/:id/refund', adminMiddleware, adminPrivilegedLimiter, async 
     const roomManager = require('./roomManager');
     await db.query('SELECT * FROM fn_refund_room($1)', [roomId]);
     await db.query(`UPDATE rooms SET status = 'refunded' WHERE id = $1`, [roomId]);
+
+    // Automatically reverse referral commissions if any were credited for this game
+    await referralManager.reverseCommissionsForRoom({
+      client: db,
+      roomId,
+      roomNumber: roomRes.rows[0].room_number,
+      reason: 'Manually refunded by admin',
+      io: roomManager.io
+    }).catch(err => console.error('Failed to reverse referral commissions:', err));
     
     if (roomManager.io) {
       roomManager.io.emit('room:refunded', { roomId, reason: 'Manually refunded by admin' });
@@ -1524,6 +1536,7 @@ router.get('/settings', adminMiddleware, adminReadLimiter, async (req, res) => {
     const sysConfig = await db.query(`SELECT * FROM system_config`);
     const configMap = sysConfig.rows.reduce((acc, row) => ({ ...acc, [row.config_key]: row.config_value }), {});
     const platformFee = parseFloat(configMap.PLATFORM_FEE_RATE || '0.15');
+    const referralCommissionRate = parseFloat(configMap.REFERRAL_COMMISSION_RATE || '0.01');
     const rawKey = configMap.VERIFY_ET_API_KEY || '';
     const maskedKey = rawKey ? `${'•'.repeat(Math.min(12, Math.max(4, rawKey.length - 4)))}${rawKey.slice(-4)}` : '';
 
@@ -1532,6 +1545,8 @@ router.get('/settings', adminMiddleware, adminReadLimiter, async (req, res) => {
       tiers: tiers.rows,
       platformFee: platformFee,
       prizePct: 1 - platformFee,
+      referralCommissionRate: referralCommissionRate,
+      referralCommissionRatePercent: Math.round(referralCommissionRate * 1000) / 10,
       telebirrPhone: configMap.TELEBIRR_PHONE || '',
       telebirrName: configMap.TELEBIRR_NAME || '',
       hasVerifyEtApiKey: Boolean(rawKey),
@@ -1561,12 +1576,18 @@ router.get('/settings/audit-logs', adminMiddleware, adminReadLimiter, async (req
 
 router.put('/settings', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
-    const { telebirrPhone, telebirrName, verifyEtApiKey, platformFee, confirmPassword } = req.body || {};
+    const { telebirrPhone, telebirrName, verifyEtApiKey, platformFee, referralCommissionRate, confirmPassword } = req.body || {};
 
     if (platformFee !== undefined) {
       const feeNum = Number(platformFee);
       if (!Number.isFinite(feeNum) || feeNum < 0 || feeNum > 1) {
         return res.status(400).json({ error: 'Platform fee must be between 0 and 1 (0% to 100%)' });
+      }
+    }
+    if (referralCommissionRate !== undefined) {
+      const rateNum = Number(referralCommissionRate);
+      if (!Number.isFinite(rateNum) || rateNum < 0 || rateNum > 0.50) {
+        return res.status(400).json({ error: 'Referral commission rate must be between 0% and 50% (0.00 to 0.50)' });
       }
     }
     if (telebirrPhone !== undefined && String(telebirrPhone).trim().length > 30) {
@@ -1589,6 +1610,10 @@ router.put('/settings', adminMiddleware, adminPrivilegedLimiter, async (req, res
       await db.query('INSERT INTO system_config (config_key, config_value) VALUES ($1, $2) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value', ['PLATFORM_FEE_RATE', String(Number(platformFee))]);
       changedKeys.push('PLATFORM_FEE_RATE');
     }
+    if (referralCommissionRate !== undefined) {
+      await referralManager.setCommissionRate(Number(referralCommissionRate));
+      changedKeys.push('REFERRAL_COMMISSION_RATE');
+    }
     if (telebirrPhone !== undefined) {
       await db.query('INSERT INTO system_config (config_key, config_value) VALUES ($1, $2) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value', ['TELEBIRR_PHONE', String(telebirrPhone).trim()]);
       changedKeys.push('TELEBIRR_PHONE');
@@ -1608,7 +1633,11 @@ router.put('/settings', adminMiddleware, adminPrivilegedLimiter, async (req, res
       action: 'update_settings',
       targetType: 'settings',
       targetIds: changedKeys,
-      snapshot: [{ changedKeys, platformFee: platformFee !== undefined ? Number(platformFee) : undefined }],
+      snapshot: [{ 
+        changedKeys, 
+        platformFee: platformFee !== undefined ? Number(platformFee) : undefined,
+        referralCommissionRate: referralCommissionRate !== undefined ? Number(referralCommissionRate) : undefined 
+      }],
       req
     });
 
@@ -1834,10 +1863,13 @@ router.delete('/admins/:id', adminMiddleware, adminPrivilegedLimiter, async (req
 
 router.get('/withdrawals', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
-    const { status, search, limit = 200 } = req.query;
+    const { status, search, limit = 200, walletType } = req.query;
 
     if (status && status !== 'all' && !ALLOWED_WITHDRAWAL_STATUSES.has(String(status))) {
       return res.status(400).json({ error: 'Invalid withdrawal status filter' });
+    }
+    if (walletType && walletType !== 'all' && !['real', 'referral'].includes(String(walletType).toLowerCase())) {
+      return res.status(400).json({ error: 'Invalid wallet type filter' });
     }
 
     const safeLimit = Math.min(200, Math.max(1, parseInt(limit, 10) || 200));
@@ -1852,7 +1884,7 @@ router.get('/withdrawals', adminMiddleware, adminReadLimiter, async (req, res) =
         adm.display_name AS admin_name
       FROM withdrawal_requests w 
       LEFT JOIN users u ON w.user_id = u.id 
-      LEFT JOIN wallets wal ON wal.user_id = w.user_id AND wal.mode = 'real'
+      LEFT JOIN wallets wal ON wal.user_id = w.user_id AND wal.mode = (CASE WHEN w.wallet_type = 'referral' THEN 'referral'::account_mode ELSE 'real'::account_mode END)
       LEFT JOIN users adm ON w.admin_id = adm.id
     `;
     const params = [];
@@ -1861,6 +1893,11 @@ router.get('/withdrawals', adminMiddleware, adminReadLimiter, async (req, res) =
     if (status && status !== 'all') {
       params.push(String(status));
       conditions.push(`w.status = $${params.length}`);
+    }
+
+    if (walletType && walletType !== 'all') {
+      params.push(String(walletType).toLowerCase());
+      conditions.push(`COALESCE(w.wallet_type, 'real') = $${params.length}`);
     }
 
     if (cleanSearch) {
@@ -2118,6 +2155,70 @@ router.post('/withdrawals/bulk-update', adminMiddleware, withdrawalMutationLimit
   }
 });
 
+
+// ── Referral Commission Management ──────────────────────────────────────────
+
+router.get('/referrals/stats', adminMiddleware, adminReadLimiter, async (req, res) => {
+  try {
+    const stats = await referralManager.getAdminStats();
+    res.json(stats);
+  } catch (err) {
+    console.error('Admin referral stats error:', err);
+    res.status(500).json({ error: 'Failed to fetch referral statistics' });
+  }
+});
+
+router.get('/referrals/commissions', adminMiddleware, adminReadLimiter, async (req, res) => {
+  try {
+    const data = await referralManager.getAdminCommissions(req.query);
+    res.json(data);
+  } catch (err) {
+    console.error('Admin referral commissions error:', err);
+    res.status(500).json({ error: 'Failed to fetch referral commissions' });
+  }
+});
+
+router.get('/referrals/top-referrers', adminMiddleware, adminReadLimiter, async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 10;
+    const top = await referralManager.getAdminTopReferrers(limit);
+    res.json({ referrers: top });
+  } catch (err) {
+    console.error('Admin top referrers error:', err);
+    res.status(500).json({ error: 'Failed to fetch top referrers' });
+  }
+});
+
+router.get('/reports/referrals', adminMiddleware, adminReadLimiter, async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT 
+        rc.id,
+        rc.created_at,
+        rc.status,
+        ref.display_name AS referrer_name,
+        ref.phone_number AS referrer_phone,
+        u.display_name AS referred_player_name,
+        u.phone_number AS referred_player_phone,
+        r.room_number,
+        r.tier,
+        rc.winning_amount,
+        rc.commission_rate,
+        rc.commission_amount,
+        rc.idempotency_key
+      FROM referral_commissions rc
+      JOIN users ref ON ref.id = rc.referrer_id
+      JOIN users u ON u.id = rc.referred_user_id
+      LEFT JOIN rooms r ON r.id = rc.room_id
+      ORDER BY rc.created_at DESC
+      LIMIT 2000
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Referral report error:', err);
+    res.status(500).json({ error: 'Failed to generate referral report' });
+  }
+});
 
 module.exports = router;
 

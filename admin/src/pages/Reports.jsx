@@ -1,6 +1,6 @@
 import { useState } from "react";
 import api from "../api";
-import { Download, FileText } from "lucide-react";
+import { Download, FileText, Users } from "lucide-react";
 
 export default function Reports() {
   const [loading, setLoading] = useState(false);
@@ -13,6 +13,7 @@ export default function Reports() {
       else if (type === 'games') data = await api.getGameReport();
       else if (type === 'transactions') data = await api.getTransactionReport();
       else if (type === 'profit') data = await api.getProfitReport();
+      else if (type === 'referrals') data = await api.getReferralReport();
 
       // Convert to CSV
       if (!data || !data.length) { alert("No data to export"); return; }
@@ -77,6 +78,17 @@ export default function Reports() {
               </div>
             </div>
             <button className="btn btn-primary btn-sm" onClick={() => downloadReport('transactions')} disabled={loading}><Download size={16}/> Export CSV</button>
+          </div>
+
+          <div className="flex-between p-4" style={{ background: "var(--bg-glass)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)" }}>
+            <div className="flex-center gap-3">
+              <div className="avatar text-success" style={{ background: "rgba(16,185,129,0.15)" }}><Users size={18}/></div>
+              <div>
+                <div className="font-bold">Referral Commissions Report</div>
+                <div className="text-sm text-muted">Lifetime referral reward settlements, inviters, winners, and commission audit keys.</div>
+              </div>
+            </div>
+            <button className="btn btn-primary btn-sm" onClick={() => downloadReport('referrals')} disabled={loading}><Download size={16}/> Export CSV</button>
           </div>
         </div>
       </div>
