@@ -165,7 +165,7 @@ async function fetchWithTimeout(url, options = {}, ms = 15000) {
 }
 
 const RECEIVER_INVITE_BONUS = 0.00;
-const SENDER_REFERRAL_REWARD = 10.00;
+const SENDER_REFERRAL_REWARD = 0.00; // Inviters earn 1% lifetime commissions on winning settlements instead of one-time signup bounty
 const VALID_PROMO_CODES = ['WELCOME25', 'FASTDERASH'];
 
 function formatOwnInviteCode(userId, dbInviteCode) {
@@ -291,11 +291,11 @@ async function applyInviteCodeTx(client, { userId, rawCode }) {
     throw err;
   }
 
-  if (referrerId) {
+  if (referrerId && SENDER_REFERRAL_REWARD > 0) {
     await creditWalletInTx(client, {
       userId: referrerId,
       amount: SENDER_REFERRAL_REWARD,
-      referenceNote: `Referral reward (10 ETB) from invite ${code}`,
+      referenceNote: `Referral reward (${SENDER_REFERRAL_REWARD} ETB) from invite ${code}`,
       idempotencyKey: `referral_reward:${userId}`
     });
   }
@@ -309,7 +309,7 @@ async function applyInviteCodeTx(client, { userId, rawCode }) {
   return {
     code,
     bonus: 0,
-    senderReward: referrerId ? SENDER_REFERRAL_REWARD : 0,
+    senderReward: 0,
     referrerId,
     newBalance
   };
@@ -775,7 +775,8 @@ app.get('/api/v1/user/invite', playerMiddleware, async (req, res) => {
 
     const ownInviteCode = formatOwnInviteCode(userId, userRes.rows[0]?.invite_code);
     const totalInvites = statsRes.rows[0]?.total_invites || 0;
-    const referralEarnings = totalInvites * SENDER_REFERRAL_REWARD;
+    const lifetimeCommissions = parseFloat(statsRes.rows[0]?.lifetime_commissions || 0);
+    const referralEarnings = lifetimeCommissions;
     const redeemed = existingRes.rows[0];
 
     return res.json({
@@ -785,10 +786,10 @@ app.get('/api/v1/user/invite', playerMiddleware, async (req, res) => {
       bonus: redeemed ? redeemed.bonus_amount : undefined,
       totalInvites,
       referralEarnings,
-      senderReward: SENDER_REFERRAL_REWARD,
+      senderReward: 0,
       welcomeBonus: RECEIVER_INVITE_BONUS,
       referralWalletBalance: parseFloat(refWalRes?.balance || 0),
-      lifetimeCommissions: parseFloat(statsRes.rows[0]?.lifetime_commissions || 0),
+      lifetimeCommissions,
       commissionRate: commRate,
       commissionRatePercent: Math.round(commRate * 1000) / 10
     });
@@ -844,11 +845,9 @@ app.post('/api/v1/user/invite', playerMiddleware, walletLimiter, async (req, res
 
     res.json({
       success: true,
-      message: result.senderReward > 0
-        ? `Invite code applied! Your inviter earned ${result.senderReward} ETB.`
-        : 'Invite code applied!',
+      message: 'Invite code applied! Your inviter will now earn 1% on every winning payout from your games.',
       bonus: 0,
-      senderReward: result.senderReward,
+      senderReward: 0,
       newBalance: result.newBalance
     });
   } catch (err) {

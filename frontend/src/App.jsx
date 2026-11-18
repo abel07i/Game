@@ -849,7 +849,7 @@ export default function App() {
             totalInvites: "የተጋበዙ",
             totalEarnings: "የግብዣ ገቢ",
             inviteCodeQuestion: "የግብዣ ኮድ አለዎት?",
-            inviteCodeDesc: "የጓደኛዎን የግብዣ ኮድ ያስገቡ — ላኪው 10 ብር ያገኛሉ!",
+            inviteCodeDesc: "የጓደኛዎን የግብዣ ኮድ ያስገቡ — የጋበዟቸው ጓደኞች ባሸነፉ ቁጥር 1% የህይወት ዘመን ኮሚሽን ያግኙ!",
             appliedLabel: "ተቀብሏል",
             applyBtn: "ተግብር",
             inviteCodeApplied: "ተተግብሯል",
@@ -859,9 +859,9 @@ export default function App() {
             inviteLinkCopied: "የግብዣ ሊንኩ ተቀድቷል!",
             copyLinkBtn: "ሊንኩን ቅዳ",
             shareLinkBtn: "ሊንክ ላክ",
-            inviteSenderRewardDesc: "ሊንኩን ለጓደኞችዎ ይላኩ — በሊንክዎ ሲመዘገቡ እርስዎ (ላኪው) ብቻ 10 ብር ያገኛሉ!",
-            inviteOptionalPlaceholder: "የግብዣ ኮድ (አማራጭ - ካለዎት)",
-            invitedBanner: (code) => `🎁 በግብዣ ኮድ ${code} ተጋብዘዋል! ሲመዘገቡ ላኪው 10 ብር ያገኛሉ።`,
+            inviteSenderRewardDesc: "ሊንኩን ለጓደኞችዎ ይላኩ — የጋበዟቸው ጓደኞች ባሸነፉ ቁጥር 1% የህይወት ዘመን ኮሚሽን ያግኙ!",
+            inviteOptionalPlaceholder: "የግብዣ ኮድ (አማራጭ — ጋባዥዎ 1% ኮሚሽን ያገኛል)",
+            invitedBanner: (code) => `🎁 በግብዣ ኮድ ${code} ተጋብዘዋል! ሲመዘገቡ ጋባዥዎ ከሚያሸንፏቸው ጨዋታዎች 1% የህይወት ዘመን ኮሚሽን ያገኛሉ።`,
             soundVoiceLabel: "ድምጽ እና የጥሪ ሙዚቃ",
             soundOn: "በርቷል",
             soundOff: "ጠፍቷል",
@@ -1196,7 +1196,7 @@ export default function App() {
             totalInvites: "Total Invites",
             totalEarnings: "Invite Earnings",
             inviteCodeQuestion: "Have an invite code?",
-            inviteCodeDesc: "Enter a friend's invite code — the sender earns 10 Birr!",
+            inviteCodeDesc: "Enter a friend's invite code — earn 1% on every winning payout your invited friends win!",
             appliedLabel: "Applied",
             applyBtn: "Apply",
             inviteCodeApplied: "Applied",
@@ -1206,9 +1206,9 @@ export default function App() {
             inviteLinkCopied: "Invite link copied!",
             copyLinkBtn: "Copy Link",
             shareLinkBtn: "Send Link",
-            inviteSenderRewardDesc: "Send this link to friends — only you (the sender) earn 10 Birr per signup!",
-            inviteOptionalPlaceholder: "Invite Code (Optional)",
-            invitedBanner: (code) => `🎁 Invited with code ${code}! Sign up to reward the sender 10 Birr.`,
+            inviteSenderRewardDesc: "Send this link to friends — earn 1% on every winning payout your invited friends win!",
+            inviteOptionalPlaceholder: "Invite Code (Optional — inviter earns 1% on your wins)",
+            invitedBanner: (code) => `🎁 Invited with code ${code}! Sign up and your inviter earns 1% on every winning payout!`,
             soundVoiceLabel: "Sound & Voice",
             soundOn: "ON",
             soundOff: "OFF",
@@ -2228,8 +2228,8 @@ export default function App() {
     const handleShareInviteLink = async () => {
         if (!userInviteLink) return;
         const shareText = language === 'am'
-            ? `Fast Ekub ይቀላቀሉ! የእኔን የግብዣ ሊንክ ይጠቀሙ: ${userInviteLink}`
-            : `Join me on Fast Ekub! Sign up with my invite link: ${userInviteLink}`;
+            ? `Fast Ekub ይቀላቀሉ! የጋበዟቸው ጓደኞች ባሸነፉ ቁጥር 1% የህይወት ዘመን ኮሚሽን ያግኙ: ${userInviteLink}`
+            : `Join me on Fast Ekub! Earn 1% on every winning payout your invited friends win: ${userInviteLink}`;
         if (navigator.share) {
             try {
                 await navigator.share({ title: 'Fast Ekub', text: shareText, url: userInviteLink });
@@ -2247,8 +2247,8 @@ export default function App() {
     const handleTelegramShare = () => {
         if (!userInviteLink) return;
         const shareText = language === 'am'
-            ? `Fast Ekub ይቀላቀሉ እና በየቀኑ በቴሌብር ገንዘብ ያሸንፉ! የግብዣ ኮዴን ይጠቀሙ: ${userInviteCode}`
-            : `Join me on Fast Ekub and win daily cash jackpots with Telebirr! Use my invite code: ${userInviteCode}`;
+            ? `Fast Ekub ይቀላቀሉ እና በየቀኑ በቴሌብር ገንዘብ ያሸንፉ! ጓደኞችዎ ባሸነፉ ቁጥር 1% የህይወት ዘመን ኮሚሽን ያግኙ: ${userInviteCode}`
+            : `Join me on Fast Ekub and win daily cash jackpots with Telebirr! Earn 1% on every winning payout your invited friends win: ${userInviteCode}`;
         const tgUrl = `https://t.me/share/url?url=${encodeURIComponent(userInviteLink)}&text=${encodeURIComponent(shareText)}`;
         window.open(tgUrl, '_blank', 'noopener,noreferrer');
     };
@@ -3918,6 +3918,10 @@ export default function App() {
                                                 </button>
                                             </div>
                                         </div>
+
+                                        <p className="text-[11px] text-white/60">
+                                            {t('inviteSenderRewardDesc')}
+                                        </p>
 
                                         <div className="flex items-center gap-2">
                                             <input
