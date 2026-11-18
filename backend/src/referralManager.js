@@ -665,13 +665,42 @@ class ReferralManager {
         (SELECT COALESCE(SUM(commission_amount), 0)::float FROM referral_commissions WHERE status = 'credited') AS total_commissions_paid,
         (SELECT COUNT(*)::int FROM referral_commissions WHERE status = 'credited') AS total_commissions_count,
         (SELECT COALESCE(SUM(commission_amount), 0)::float FROM referral_commissions WHERE status = 'reversed') AS total_commissions_reversed,
-        (SELECT COALESCE(SUM(balance), 0)::float FROM wallets WHERE mode = 'referral') AS total_unclaimed_referral_balance
+        (SELECT COALESCE(SUM(balance), 0)::float FROM wallets WHERE mode = 'referral') AS total_unclaimed_referral_balance,
+        (SELECT COALESCE(SUM(amount), 0)::float FROM withdrawal_requests WHERE wallet_type = 'referral' AND status = 'approved') AS total_referral_withdrawn
     `);
+
+    const row = res.rows[0] || {};
+    const totalReferredPlayers = parseInt(row.total_referred_players, 10) || 0;
+    const totalReferrers = parseInt(row.total_referrers, 10) || 0;
+    const totalCommissionsPaid = parseFloat(row.total_commissions_paid || 0);
+    const totalCommissionsCount = parseInt(row.total_commissions_count, 10) || 0;
+    const totalCommissionsReversed = parseFloat(row.total_commissions_reversed || 0);
+    const totalReferralBalanceHeld = parseFloat(row.total_unclaimed_referral_balance || 0);
+    const totalReferralWithdrawn = parseFloat(row.total_referral_withdrawn || 0);
 
     return {
       commissionRate,
       commissionRatePercent: Math.round(commissionRate * 1000) / 10,
-      ...(res.rows[0] || {})
+      activeCommissionRate: commissionRate,
+      activeCommissionRatePercent: Math.round(commissionRate * 1000) / 10,
+
+      // camelCase for React components
+      totalReferredPlayers,
+      totalReferrers,
+      totalCommissionsPaid,
+      totalCommissionsCount,
+      totalCommissionsReversed,
+      totalReferralBalanceHeld,
+      totalReferralWithdrawn,
+
+      // snake_case backwards compatibility
+      total_referred_players: totalReferredPlayers,
+      total_referrers: totalReferrers,
+      total_commissions_paid: totalCommissionsPaid,
+      total_commissions_count: totalCommissionsCount,
+      total_commissions_reversed: totalCommissionsReversed,
+      total_unclaimed_referral_balance: totalReferralBalanceHeld,
+      total_referral_withdrawn: totalReferralWithdrawn
     };
   }
 
@@ -697,15 +726,17 @@ class ReferralManager {
         ref.display_name ILIKE $${params.length} OR 
         ref.phone_number ILIKE $${params.length} OR 
         u.display_name ILIKE $${params.length} OR 
-        u.phone_number ILIKE $${params.length}
+        u.phone_number ILIKE $${params.length} OR
+        r.room_number::text ILIKE $${params.length} OR
+        rc.idempotency_key ILIKE $${params.length}
       )`);
     }
 
-    if (dateFrom) {
+    if (dateFrom && !isNaN(Date.parse(dateFrom))) {
       params.push(dateFrom);
       conditions.push(`rc.created_at >= $${params.length}::timestamp`);
     }
-    if (dateTo) {
+    if (dateTo && !isNaN(Date.parse(dateTo))) {
       params.push(`${dateTo} 23:59:59.999`);
       conditions.push(`rc.created_at <= $${params.length}::timestamp`);
     }
@@ -717,6 +748,7 @@ class ReferralManager {
        FROM referral_commissions rc
        JOIN users ref ON ref.id = rc.referrer_id
        JOIN users u ON u.id = rc.referred_user_id
+       LEFT JOIN rooms r ON r.id = rc.room_id
        ${whereClause}`,
       params
     );
@@ -729,6 +761,7 @@ class ReferralManager {
          rc.id,
          rc.created_at,
          rc.winning_amount::float AS winning_amount,
+         rc.winning_amount::float AS winning_payout,
          rc.commission_rate::float AS commission_rate,
          rc.commission_amount::float AS commission_amount,
          rc.status,
@@ -768,8 +801,11 @@ class ReferralManager {
       SELECT 
         u.id AS referrer_id,
         u.display_name,
+        u.display_name AS referrer_name,
         u.phone_number,
+        u.phone_number AS referrer_phone,
         u.invite_code,
+        u.invite_code AS referral_code,
         (SELECT COUNT(*)::int FROM user_invites WHERE referrer_id = u.id) AS total_invited,
         (SELECT COUNT(DISTINCT ui.user_id)::int FROM user_invites ui JOIN tickets t ON t.user_id = ui.user_id WHERE ui.referrer_id = u.id) AS active_players,
         (SELECT COALESCE(SUM(commission_amount), 0)::float FROM referral_commissions WHERE referrer_id = u.id AND status = 'credited') AS total_earned,
@@ -781,6 +817,78 @@ class ReferralManager {
     `, [Math.min(50, Math.max(1, limit))]);
 
     return res.rows;
+  }
+
+  /**
+   * Admin: Paginated list of referral relationships (invitations network).
+   */
+  async getAdminRelationships({ page = 1, limit = 20, search } = {}) {
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const offset = (pageNum - 1) * limitNum;
+
+    const conditions = [];
+    const params = [];
+
+    if (search && search.trim()) {
+      params.push(`%${search.trim()}%`);
+      conditions.push(`(
+        ref.display_name ILIKE $${params.length} OR 
+        ref.phone_number ILIKE $${params.length} OR 
+        u.display_name ILIKE $${params.length} OR 
+        u.phone_number ILIKE $${params.length} OR
+        ui.invite_code ILIKE $${params.length}
+      )`);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const countRes = await db.query(
+      `SELECT COUNT(*)::int AS total 
+       FROM user_invites ui
+       JOIN users ref ON ref.id = ui.referrer_id
+       JOIN users u ON u.id = ui.user_id
+       ${whereClause}`,
+      params
+    );
+
+    const total = countRes.rows[0]?.total || 0;
+    const dataParams = [...params, limitNum, offset];
+
+    const dataRes = await db.query(
+      `SELECT 
+         ui.id,
+         ui.user_id AS referred_user_id,
+         ui.referrer_id,
+         ui.invite_code,
+         ui.bonus_amount::float AS bonus_amount,
+         ui.commission_rate::float AS commission_rate,
+         ui.total_commissions_earned::float AS total_commissions_earned,
+         ui.created_at AS joined_at,
+         ui.last_commission_at,
+         ref.display_name AS referrer_name,
+         ref.phone_number AS referrer_phone,
+         u.display_name AS referred_name,
+         u.phone_number AS referred_phone,
+         u.is_active AS referred_active,
+         (SELECT COUNT(*)::int FROM tickets t WHERE t.user_id = ui.user_id) AS games_played,
+         (SELECT COUNT(*)::int FROM tickets t WHERE t.user_id = ui.user_id AND t.is_winner = true) AS games_won
+       FROM user_invites ui
+       JOIN users ref ON ref.id = ui.referrer_id
+       JOIN users u ON u.id = ui.user_id
+       ${whereClause}
+       ORDER BY ui.created_at DESC
+       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+      dataParams
+    );
+
+    return {
+      total,
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(total / limitNum),
+      relationships: dataRes.rows
+    };
   }
 }
 

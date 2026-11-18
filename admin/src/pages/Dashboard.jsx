@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import api from "../api";
-import { Users, Gamepad2, TrendingUp, DollarSign, Activity } from "lucide-react";
+import { Users, Gamepad2, TrendingUp, DollarSign, Activity, Share2, ArrowUpRight } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 
 export default function Dashboard() {
@@ -118,6 +119,63 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+
+        {/* Lifetime Referral System Snapshot */}
+        {stats.referrals && (
+          <div className="card" style={{ gridColumn: "1 / -1", marginTop: 8 }}>
+            <div className="card-header flex-between">
+              <div className="card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Share2 size={18} color="var(--accent)" /> Lifetime Referral System Overview
+              </div>
+              <Link to="/referrals" className="btn btn-ghost btn-sm" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                Manage Referrals <ArrowUpRight size={14} />
+              </Link>
+            </div>
+            <div className="card-body" style={{ padding: 16 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 }}>
+                <div style={{ padding: 12, background: "var(--bg-glass)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)" }}>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>Referred Players</div>
+                  <div style={{ fontSize: 20, fontWeight: 700 }}>
+                    {stats.referrals.totalReferredPlayers || stats.referrals.total_referred_players || 0}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                    From {stats.referrals.totalReferrers || stats.referrals.total_referrers || 0} active inviters
+                  </div>
+                </div>
+
+                <div style={{ padding: 12, background: "var(--bg-glass)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)" }}>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>Total Commissions Paid</div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: "var(--accent)" }}>
+                    {Number(stats.referrals.totalCommissionsPaid || stats.referrals.total_commissions_paid || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                    {stats.referrals.totalCommissionsCount || stats.referrals.total_commissions_count || 0} rewards distributed
+                  </div>
+                </div>
+
+                <div style={{ padding: 12, background: "var(--bg-glass)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)" }}>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>Unclaimed Referral Wallets</div>
+                  <div style={{ fontSize: 20, fontWeight: 700 }}>
+                    {Number(stats.referrals.totalReferralBalanceHeld || stats.referrals.total_unclaimed_referral_balance || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                    Available for telebirr payout
+                  </div>
+                </div>
+
+                <div style={{ padding: 12, background: "var(--bg-glass)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)" }}>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>Active Commission Rate</div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: "var(--success)" }}>
+                    {stats.referrals.activeCommissionRatePercent != null ? stats.referrals.activeCommissionRatePercent : (stats.referrals.active_commission_rate_percent || "1.0")}%
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                    Platform funded (100% winner payout)
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

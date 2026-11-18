@@ -122,7 +122,14 @@ const api = {
     const qs = new URLSearchParams(params).toString();
     return request('GET', `/referrals/commissions${qs ? '?' + qs : ''}`);
   },
-  getTopReferrers: (limit = 10) => request('GET', `/referrals/top-referrers?limit=${limit}`),
+  getTopReferrers: async (limit = 10) => {
+    const res = await request('GET', `/referrals/top-referrers?limit=${limit}`);
+    return Array.isArray(res) ? res : (res?.referrers || res?.top || []);
+  },
+  getReferralRelationships: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request('GET', `/referrals/relationships${qs ? '?' + qs : ''}`);
+  },
   getReferralReport: () => request('GET', '/reports/referrals'),
 
   // Settings & Admins

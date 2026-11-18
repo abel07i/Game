@@ -370,7 +370,7 @@ router.put('/auth/profile', adminMiddleware, adminPrivilegedLimiter, async (req,
 
 router.get('/dashboard/stats', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
-    const [players, activeGames, finance, today, depositTotal, withdrawalTotal] = await Promise.all([
+    const [players, activeGames, finance, today, depositTotal, withdrawalTotal, referralStats] = await Promise.all([
       db.query(`
         SELECT
           COUNT(*) FILTER (WHERE role = 'player') AS total_players,
@@ -404,7 +404,11 @@ router.get('/dashboard/stats', adminMiddleware, adminReadLimiter, async (req, re
         WHERE pt.collected_at >= CURRENT_DATE
       `),
       db.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE tx_type = 'deposit'`),
-      db.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE tx_type = 'withdrawal'`)
+      db.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE tx_type = 'withdrawal'`),
+      referralManager.getAdminStats().catch(err => {
+        console.error('Failed to load referral stats for dashboard:', err);
+        return null;
+      })
     ]);
 
     res.json({
@@ -415,7 +419,13 @@ router.get('/dashboard/stats', adminMiddleware, adminReadLimiter, async (req, re
         total_deposits: depositTotal.rows[0].total,
         total_withdrawals: withdrawalTotal.rows[0].total
       },
-      today: today.rows[0]
+      today: today.rows[0],
+      referrals: referralStats || {
+        total_referred_players: 0,
+        total_referrers: 0,
+        total_commissions_paid: 0,
+        active_commission_rate_percent: 1.0
+      }
     });
   } catch (err) {
     console.error('Dashboard stats error:', err);
@@ -2195,10 +2205,20 @@ router.get('/referrals/top-referrers', adminMiddleware, adminReadLimiter, async 
   try {
     const limit = parseInt(req.query.limit, 10) || 10;
     const top = await referralManager.getAdminTopReferrers(limit);
-    res.json({ referrers: top });
+    res.json({ referrers: top, top });
   } catch (err) {
     console.error('Admin top referrers error:', err);
     res.status(500).json({ error: 'Failed to fetch top referrers' });
+  }
+});
+
+router.get('/referrals/relationships', adminMiddleware, adminReadLimiter, async (req, res) => {
+  try {
+    const data = await referralManager.getAdminRelationships(req.query);
+    res.json(data);
+  } catch (err) {
+    console.error('Admin referral relationships error:', err);
+    res.status(500).json({ error: 'Failed to fetch referral relationships' });
   }
 });
 
