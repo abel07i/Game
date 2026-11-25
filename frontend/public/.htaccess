@@ -1,9 +1,79 @@
+# ------------------------------------------------------------------------------
+# Fast Ekub Player App - Apache Security & SPA Configuration (.htaccess)
+# ------------------------------------------------------------------------------
+
+# 1. Disable Directory Browsing & MultiViews
+Options -Indexes -MultiViews
+
+# 2. URL Rewriting, Method Filtering & SPA Routing under /
 <IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteBase /
-  RewriteRule ^index\.html$ - [L]
-  RewriteCond %{REQUEST_FILENAME} !-f
-  RewriteCond %{REQUEST_FILENAME} !-d
-  RewriteRule . /index.html [L]
+
+  # Block dangerous HTTP trace/track methods (XST prevention)
+  RewriteCond %{REQUEST_METHOD} ^(TRACE|TRACK) [NC]
+  RewriteRule .* - [F,L]
+
+  # Block access to hidden dotfiles/directories (except .well-known for SSL)
+  RewriteRule "(^|/)\.(?!well-known/)" - [F,L]
+
+  # Serve existing files and directories directly
+  RewriteCond %{REQUEST_FILENAME} -f [OR]
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule ^ - [L]
+
+  # Fallback all SPA routes to /index.html
+  RewriteRule ^ /index.html [L]
 </IfModule>
 
+# 3. Block Sensitive & Configuration Files
+<FilesMatch "(^\.(?!well-known)|\.(env|log|md|sql|bak|old|orig|swp|yml|yaml|map|sh)$|package(-lock)?\.json$)">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order deny,allow
+    Deny from all
+  </IfModule>
+</FilesMatch>
+
+# 4. Security Headers & Cache-Control
+<IfModule mod_headers.c>
+  # Prevent clickjacking
+  Header always set X-Frame-Options "DENY"
+  # Prevent MIME type sniffing
+  Header always set X-Content-Type-Options "nosniff"
+  # Control referrer leakage
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  # Restrict unnecessary browser hardware APIs
+  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+  # Legacy XSS filter header (recommended 0 when CSP is set)
+  Header always set X-XSS-Protection "0"
+  # Content Security Policy (XSS & data injection mitigation)
+  Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https: ws: wss:; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'"
+  # Enforce HTTPS via HSTS when served over TLS
+  Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains" env=HTTPS
+  # Remove server framework fingerprint if present
+  Header always unset X-Powered-By
+
+  # Never cache index.html so players always receive the latest build
+  <Files "index.html">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+    Header set Pragma "no-cache"
+  </Files>
+</IfModule>
+
+# 5. Browser Caching for Hashed Static Assets
+<IfModule mod_expires.c>
+  ExpiresActive On
+
+  <Files "index.html">
+    ExpiresDefault "access plus 0 seconds"
+  </Files>
+
+  ExpiresByType text/css "access plus 1 year"
+  ExpiresByType application/javascript "access plus 1 year"
+  ExpiresByType image/svg+xml "access plus 1 month"
+  ExpiresByType image/png "access plus 1 month"
+  ExpiresByType image/jpeg "access plus 1 month"
+</IfModule>
