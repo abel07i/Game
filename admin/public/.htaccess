@@ -1,8 +1,60 @@
+# ------------------------------------------------------------------------------
+# Fast Ekub Admin Panel - Apache Server Configuration (.htaccess)
+# Single Page Application (SPA) routing, security headers & asset caching
+# ------------------------------------------------------------------------------
+
+# 1. Enable URL Rewriting for React Router SPA
 <IfModule mod_rewrite.c>
   RewriteEngine On
-  RewriteRule ^index\.html$ - [L]
-  RewriteCond %{REQUEST_FILENAME} !-f
-  RewriteCond %{REQUEST_FILENAME} !-d
-  RewriteRule . index.html [L]
+  RewriteBase /admin/
+
+  # If an existing file or directory is requested, serve it directly
+  RewriteCond %{REQUEST_FILENAME} -f [OR]
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule ^ - [L]
+
+  # For all other routes (e.g. /admin/players, /admin/referrals), rewrite to /admin/index.html
+  RewriteRule ^ index.html [L]
 </IfModule>
 
+# 2. Security Headers (Protect Admin Dashboard)
+<IfModule mod_headers.c>
+  # Prevent clickjacking (embedding admin panel in hostile iframes)
+  Header always set X-Frame-Options "SAMEORIGIN"
+  # Prevent MIME type sniffing
+  Header always set X-Content-Type-Options "nosniff"
+  # Control referrer leakage
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
+
+# 3. Disable Directory Browsing
+Options -Indexes
+
+# 4. Block Sensitive Files
+<FilesMatch "(^\.|\.json$|\.env|\.log|\.md$)">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order deny,allow
+    Deny from all
+  </IfModule>
+</FilesMatch>
+
+# 5. Browser Caching
+<IfModule mod_expires.c>
+  ExpiresActive On
+
+  # Do not cache index.html (ensures admins always load the latest build)
+  <Files "index.html">
+    ExpiresDefault "access plus 0 seconds"
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+  </Files>
+
+  # Cache hashed static assets (JS, CSS, images, fonts)
+  ExpiresByType text/css "access plus 1 year"
+  ExpiresByType application/javascript "access plus 1 year"
+  ExpiresByType image/svg+xml "access plus 1 month"
+  ExpiresByType image/png "access plus 1 month"
+  ExpiresByType image/jpeg "access plus 1 month"
+</IfModule>
