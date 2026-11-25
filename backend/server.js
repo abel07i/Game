@@ -1516,8 +1516,8 @@ app.get('/api/v1/results', async (req, res) => {
       FROM rooms r 
       JOIN users u ON u.id = r.winner_user_id 
       JOIN tickets t ON t.id = r.winner_ticket_id
-      WHERE r.status = 'settled' 
-      ORDER BY r.settled_at DESC LIMIT 20
+      WHERE r.status = 'settled' AND r.winner_user_id IS NOT NULL AND r.net_winner_payout > 0
+      ORDER BY r.settled_at DESC LIMIT 10
     `);
     res.json(result.rows);
   } catch (err) {

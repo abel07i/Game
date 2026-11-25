@@ -1430,7 +1430,7 @@ export default function App() {
 
         fetch(`${API_URL}/api/v1/results`)
             .then(res => res.json())
-            .then(data => setResults(Array.isArray(data) ? data : []))
+            .then(data => setResults(Array.isArray(data) ? data.slice(0, 10) : []))
             .catch(err => console.error(err));
 
         socket.on('room:state_update', (roomsData) => setRooms(Array.isArray(roomsData) ? roomsData : []));
@@ -1549,16 +1549,18 @@ export default function App() {
                 result: data
             } : prev);
 
-            setResults(prev => [{
-                id: data.roomId,
-                room_number: data.roomNumber,
-                tier: data.tierCategory,
-                target_jackpot: data.targetJackpot,
-                winner_username: data.winnerUsername,
-                amount: data.netPayout,
-                seat_number: data.winnerSeatNumber,
-                settled_at: new Date().toISOString()
-            }, ...prev].slice(0, 20));
+            if (data.winnerUsername && Number(data.netPayout) > 0) {
+                setResults(prev => [{
+                    id: data.roomId,
+                    room_number: data.roomNumber,
+                    tier: data.tierCategory,
+                    target_jackpot: data.targetJackpot,
+                    winner_username: data.winnerUsername,
+                    amount: data.netPayout,
+                    seat_number: data.winnerSeatNumber,
+                    settled_at: new Date().toISOString()
+                }, ...prev.filter(r => r.id !== data.roomId)].slice(0, 10));
+            }
 
             setTimeout(() => {
                 const currentUserId = userRef.current?.id;
@@ -1586,6 +1588,7 @@ export default function App() {
         socket.on('room:refunded', ({ roomId, reason }) => {
             if (drawIntervalRef.current) clearInterval(drawIntervalRef.current);
             setRooms(prev => prev.filter(r => r.id !== roomId));
+            setResults(prev => prev.filter(r => r.id !== roomId));
             if (seatModalRef.current.open && seatModalRef.current.room?.id === roomId) {
                 setSeatModal({ open: false, room: null, selectedSeats: [] });
                 showAlert(reason || 'Game room was cancelled and all tickets were refunded.', 'info');
@@ -2564,7 +2567,7 @@ export default function App() {
                                                 <span>{t('resultsTab')}</span>
                                                 <span className={`text-[9.5px] px-1.5 py-0.2 rounded-full font-bold ${roomSubTab === 'results' ? 'bg-black/20 text-black' : 'bg-white/10 text-white/70'
                                                     }`}>
-                                                    {results.length}
+                                                    {Math.min(results.length, 10)}
                                                 </span>
                                             </button>
                                         </div>
@@ -2680,7 +2683,7 @@ export default function App() {
                                                 <div className="flex items-center justify-between px-1 text-[11px] text-white/50 font-medium">
                                                     <span className="flex items-center gap-1.5">
                                                         <span>🏆</span>
-                                                        <span>{language === 'am' ? 'የቅርብ ጊዜ አሸናፊዎች' : 'Recent Settled Games'}</span>
+                                                        <span>{language === 'am' ? 'የቅርብ ጊዜ 10 አሸናፊዎች' : 'Recent 10 Winners'}</span>
                                                     </span>
                                                     <span className="text-gold-400 font-mono text-[10px]">
                                                         {language === 'am' ? 'ክሪፕቶ ዕጣ የተረጋገጠ' : 'Provably Fair'}
