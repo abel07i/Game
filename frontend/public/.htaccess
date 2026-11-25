@@ -2,8 +2,8 @@
 # Fast Ekub Player App - Apache Security & SPA Configuration (.htaccess)
 # ------------------------------------------------------------------------------
 
-# 1. Disable Directory Browsing & MultiViews
-Options -Indexes -MultiViews
+# 1. Disable Directory Browsing
+Options -Indexes
 
 # 2. URL Rewriting, Method Filtering & SPA Routing under /
 <IfModule mod_rewrite.c>
@@ -17,6 +17,10 @@ Options -Indexes -MultiViews
   # Block access to hidden dotfiles/directories (except .well-known for SSL)
   RewriteRule "(^|/)\.(?!well-known/)" - [F,L]
 
+  # Do not rewrite backend API, WebSocket, or Admin paths
+  RewriteCond %{REQUEST_URI} ^/(api|socket\.io|admin)(/|$) [NC]
+  RewriteRule ^ - [L]
+
   # Serve existing files and directories directly
   RewriteCond %{REQUEST_FILENAME} -f [OR]
   RewriteCond %{REQUEST_FILENAME} -d
@@ -26,8 +30,8 @@ Options -Indexes -MultiViews
   RewriteRule ^ /index.html [L]
 </IfModule>
 
-# 3. Block Sensitive & Configuration Files
-<FilesMatch "(^\.(?!well-known)|\.(env|log|md|sql|bak|old|orig|swp|yml|yaml|map|sh)$|package(-lock)?\.json$)">
+# 3. Block Sensitive & Configuration Files (case-insensitive)
+<FilesMatch "(?i)(^\.(?!well-known)|\.(env|log|md|sql|bak|old|orig|swp|yml|yaml|map|sh)$|package(-lock)?\.json$)">
   <IfModule mod_authz_core.c>
     Require all denied
   </IfModule>
