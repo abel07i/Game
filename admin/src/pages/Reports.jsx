@@ -1,5 +1,6 @@
 import { useState } from "react";
 import api from "../api";
+import { buildCsvContent } from "../utils/csv";
 import { Download, FileText, Users } from "lucide-react";
 
 export default function Reports() {
@@ -15,15 +16,10 @@ export default function Reports() {
       else if (type === 'profit') data = await api.getProfitReport();
       else if (type === 'referrals') data = await api.getReferralReport();
 
-      // Convert to CSV
+      // Convert to CSV (with formula injection protection)
       if (!data || !data.length) { alert("No data to export"); return; }
-      const headers = Object.keys(data[0]);
-      const csvRows = [
-        headers.join(","),
-        ...data.map(row => headers.map(h => `"${(row[h] ?? '').toString().replace(/"/g, '""')}"`).join(","))
-      ];
-      const csvString = csvRows.join("\n");
-      const blob = new Blob([csvString], { type: 'text/csv' });
+      const csvString = buildCsvContent(data);
+      const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.setAttribute('hidden', '');

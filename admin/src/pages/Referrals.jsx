@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import api from "../api";
+import { buildCsvContent } from "../utils/csv";
 import { 
   Users, 
   Award, 
@@ -198,12 +199,8 @@ export default function Referrals() {
         showToast("error", "No referral commission records found to export");
         return;
       }
-      const headers = Object.keys(data[0]);
-      const csvRows = [
-        headers.join(","),
-        ...data.map(row => headers.map(h => `"${(row[h] ?? '').toString().replace(/"/g, '""')}"`).join(","))
-      ];
-      const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
+      const csvString = buildCsvContent(data);
+      const blob = new Blob([csvString], { type: "text/csv;charset=utf-8;" });
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
