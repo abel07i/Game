@@ -178,8 +178,13 @@ export default function Withdrawals() {
     });
   };
 
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [filter, walletFilter, search]);
+
   const handleToggleSelectAll = () => {
-    if (selectedIds.size === filteredList.length) {
+    const allVisibleSelected = filteredList.length > 0 && filteredList.every(w => selectedIds.has(w.id));
+    if (allVisibleSelected) {
       setSelectedIds(new Set());
     } else {
       setSelectedIds(new Set(filteredList.map(w => w.id)));
@@ -376,8 +381,14 @@ export default function Withdrawals() {
     let pendingCount = 0, pendingAmount = 0;
     let approvedCount = 0, approvedAmount = 0;
     let rejectedCount = 0, rejectedAmount = 0;
+    let totalCount = 0;
 
     for (const w of withdrawals) {
+      if (walletFilter !== "all") {
+        const itemWalletType = w.wallet_type === "referral" ? "referral" : "real";
+        if (itemWalletType !== walletFilter) continue;
+      }
+      totalCount++;
       const amt = parseFloat(w.amount) || 0;
       if (w.status === "pending") {
         pendingCount++;
@@ -395,9 +406,9 @@ export default function Withdrawals() {
       pending: { count: pendingCount, amount: pendingAmount },
       approved: { count: approvedCount, amount: approvedAmount },
       rejected: { count: rejectedCount, amount: rejectedAmount },
-      totalCount: withdrawals.length
+      totalCount
     };
-  }, [withdrawals]);
+  }, [withdrawals, walletFilter]);
 
   // ─── Filtered and Searched List ───────────────────────────────────────────
   const filteredList = useMemo(() => {
@@ -413,20 +424,22 @@ export default function Withdrawals() {
 
       // Search filter
       if (search.trim()) {
-        const q = search.toLowerCase();
+        const q = search.toLowerCase().trim();
         const userName = (w.user_name || "").toLowerCase();
+        const userPhone = (w.user_phone || "").toLowerCase();
         const phone = (w.phone_number || "").toLowerCase();
+        const holder = (w.account_holder_name || "").toLowerCase();
         const notes = (w.notes || "").toLowerCase();
         const amount = String(w.amount || "");
         const id = String(w.id || "").toLowerCase();
-        if (!userName.includes(q) && !phone.includes(q) && !notes.includes(q) && !amount.includes(q) && !id.includes(q)) {
+        if (!userName.includes(q) && !userPhone.includes(q) && !phone.includes(q) && !holder.includes(q) && !notes.includes(q) && !amount.includes(q) && !id.includes(q)) {
           return false;
         }
       }
 
       return true;
     });
-  }, [withdrawals, filter, search]);
+  }, [withdrawals, filter, walletFilter, search]);
 
   // Identify how many of the selected are pending
   const selectedPendingCount = useMemo(() => {
@@ -627,15 +640,26 @@ export default function Withdrawals() {
             </div>
 
             {/* Search input */}
-            <div className="search-input-wrapper">
-              <Search size={18} />
-              <input
-                type="text"
-                className="form-input"
-                placeholder="Search by player, phone number, notes, ID..."
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-              />
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <div className="search-input-wrapper">
+                <Search size={18} />
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Search by player, phone, holder, notes, ID..."
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                />
+              </div>
+              {(search || walletFilter !== "all") && (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => { setSearch(""); setWalletFilter("all"); }}
+                >
+                  Clear
+                </button>
+              )}
             </div>
           </div>
 

@@ -170,6 +170,12 @@ async function applyWithdrawalDecisions({ client, items, status, adminId, adminU
       if (!refundRes.rows[0]?.success) {
         throw new Error('Failed to refund user balance');
       }
+      if (reqItem.transaction_id) {
+        await client.query(
+          `UPDATE transactions SET status = 'reversed' WHERE id = $1 AND status = 'pending'`,
+          [reqItem.transaction_id]
+        );
+      }
     } else if (status === 'approved' && reqItem.transaction_id) {
       const payoutNote = trimmedNotes ? `Withdrawal paid via Telebirr (${trimmedNotes})` : 'Withdrawal paid via Telebirr';
       await client.query(
@@ -2161,7 +2167,7 @@ router.get('/withdrawals', adminMiddleware, adminReadLimiter, async (req, res) =
 
     if (cleanSearch) {
       params.push(`%${cleanSearch}%`);
-      conditions.push(`(u.display_name ILIKE $${params.length} OR w.phone_number ILIKE $${params.length} OR w.notes ILIKE $${params.length} OR CAST(w.id AS TEXT) ILIKE $${params.length})`);
+      conditions.push(`(u.display_name ILIKE $${params.length} OR u.phone_number ILIKE $${params.length} OR w.phone_number ILIKE $${params.length} OR COALESCE(w.account_holder_name, '') ILIKE $${params.length} OR COALESCE(w.notes, '') ILIKE $${params.length} OR CAST(w.id AS TEXT) ILIKE $${params.length})`);
     }
 
     if (conditions.length > 0) {
