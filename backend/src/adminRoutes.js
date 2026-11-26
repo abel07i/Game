@@ -45,7 +45,8 @@ const adminReadLimiter = createRateLimiter({
 
 const ALLOWED_TX_TYPES = new Set([
   'deposit', 'withdrawal', 'ticket_buy', 'payout_win',
-  'platform_tax', 'refund', 'demo_credit', 'adjustment'
+  'platform_tax', 'refund', 'demo_credit', 'adjustment',
+  'referral_commission', 'referral_reversal', 'referral_payout'
 ]);
 const ALLOWED_TX_STATUSES = new Set(['pending', 'completed', 'failed', 'reversed']);
 const ALLOWED_WITHDRAWAL_STATUSES = new Set(['pending', 'approved', 'rejected', 'cancelled']);
@@ -1409,13 +1410,16 @@ router.put('/room-configs/quota/:groupSize', adminMiddleware, adminPrivilegedLim
 
 router.get('/transactions', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
-    const { type, status, dateFrom, dateTo, search, page = 1, limit = 20 } = req.query;
+    const { type, status, mode, dateFrom, dateTo, search, page = 1, limit = 20 } = req.query;
 
     if (type && !ALLOWED_TX_TYPES.has(String(type))) {
       return res.status(400).json({ error: 'Invalid transaction type filter' });
     }
     if (status && !ALLOWED_TX_STATUSES.has(String(status))) {
       return res.status(400).json({ error: 'Invalid transaction status filter' });
+    }
+    if (mode && !['real', 'referral', 'demo'].includes(String(mode))) {
+      return res.status(400).json({ error: 'Invalid wallet mode filter' });
     }
     const dr = validateDateRange(dateFrom, dateTo);
     if (!dr.ok) {
@@ -1432,11 +1436,12 @@ router.get('/transactions', adminMiddleware, adminReadLimiter, async (req, res) 
 
     if (type) { params.push(String(type)); whereClause += ` AND t.tx_type = $${params.length}`; }
     if (status) { params.push(String(status)); whereClause += ` AND t.status = $${params.length}`; }
+    if (mode) { params.push(String(mode)); whereClause += ` AND w.mode = $${params.length}`; }
     if (dateFrom) { params.push(String(dateFrom)); whereClause += ` AND t.created_at >= $${params.length}::DATE`; }
     if (dateTo) { params.push(String(dateTo)); whereClause += ` AND t.created_at < ($${params.length}::DATE + INTERVAL '1 day')`; }
     if (cleanSearch) {
       params.push(`%${cleanSearch}%`);
-      whereClause += ` AND (u.display_name ILIKE $${params.length} OR u.phone_number ILIKE $${params.length} OR COALESCE(t.reference_note, '') ILIKE $${params.length})`;
+      whereClause += ` AND (u.display_name ILIKE $${params.length} OR u.phone_number ILIKE $${params.length} OR COALESCE(t.reference_note, '') ILIKE $${params.length} OR t.id::text ILIKE $${params.length})`;
     }
 
     const countResult = await db.query(`

@@ -16,9 +16,10 @@ import {
 } from "lucide-react";
 
 export default function Transactions() {
+  const initialFilters = { type: "", status: "", mode: "", dateFrom: "", dateTo: "", search: "", page: 1 };
   const [data, setData] = useState({ transactions: [], total: 0 });
   const [loading, setLoading] = useState(true);
-  const [filters, setFilters] = useState({ type: "", search: "", page: 1 });
+  const [filters, setFilters] = useState(initialFilters);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [toast, setToast] = useState(null);
 
@@ -44,9 +45,12 @@ export default function Transactions() {
     setTimeout(() => setToast(null), 4000);
   };
 
-  const fetchTx = () => {
+  const fetchTx = (activeFilters = filters) => {
     setLoading(true);
-    api.getTransactions(filters)
+    const cleanParams = Object.fromEntries(
+      Object.entries(activeFilters).filter(([, v]) => v !== "" && v !== null && v !== undefined)
+    );
+    api.getTransactions(cleanParams)
       .then(res => {
         setData(res || { transactions: [], total: 0 });
         setSelectedIds(new Set()); // Reset selections on page change or refresh
@@ -59,12 +63,37 @@ export default function Transactions() {
   };
 
   useEffect(() => {
-    fetchTx();
-  }, [filters.page, filters.type, filters.search]);
+    fetchTx(filters);
+  }, [filters.page, filters.type, filters.status, filters.mode]);
 
-  const getTxColor = (type) => {
-    if (['DEPOSIT', 'WIN', 'PAYOUT_WIN', 'REFUND'].includes(type)) return 'var(--success)';
-    if (['WITHDRAWAL', 'WAGER', 'TICKET_BUY'].includes(type)) return 'var(--danger)';
+  const handleSearch = (e) => {
+    e.preventDefault();
+    if (filters.dateFrom && filters.dateTo && filters.dateFrom > filters.dateTo) {
+      showToast("error", "Start date cannot be after end date.");
+      return;
+    }
+    if (filters.page !== 1) {
+      setFilters({ ...filters, page: 1 });
+    } else {
+      fetchTx(filters);
+    }
+  };
+
+  const hasActiveFilters = Boolean(
+    filters.type || filters.status || filters.mode || filters.dateFrom || filters.dateTo || filters.search
+  );
+
+  const handleResetFilters = () => {
+    setFilters(initialFilters);
+    fetchTx(initialFilters);
+  };
+
+  const getTxColor = (txOrType) => {
+    if (typeof txOrType === 'object' && txOrType !== null) {
+      return Number(txOrType.direction) > 0 ? 'var(--success)' : 'var(--danger)';
+    }
+    if (['DEPOSIT', 'WIN', 'PAYOUT_WIN', 'REFUND', 'REFERRAL_COMMISSION', 'DEMO_CREDIT'].includes(txOrType)) return 'var(--success)';
+    if (['WITHDRAWAL', 'WAGER', 'TICKET_BUY', 'REFERRAL_PAYOUT', 'REFERRAL_REVERSAL'].includes(txOrType)) return 'var(--danger)';
     return 'var(--text-primary)';
   };
 
@@ -203,7 +232,7 @@ export default function Transactions() {
             <History size={16} />
             <span>{auditOpen ? "Hide Audit Log" : "Security Audit Log"}</span>
           </button>
-          <button className="btn btn-ghost" onClick={fetchTx} disabled={loading} title="Refresh transactions">
+          <button className="btn btn-ghost" onClick={() => fetchTx()} disabled={loading} title="Refresh transactions">
             <RefreshCw size={16} className={loading ? "spinner" : ""} />
             <span>Refresh</span>
           </button>
@@ -296,34 +325,92 @@ export default function Transactions() {
       <div className="card">
         <div className="card-body">
           {/* Controls / Filter row */}
-          <div className="filter-row mb-4">
-            <div className="flex gap-2" style={{ flexWrap: "wrap", flex: 1 }}>
-              <select
-                className="form-select"
-                style={{ width: "auto" }}
-                value={filters.type}
-                onChange={e => setFilters({ ...filters, type: e.target.value, page: 1 })}
-              >
-                <option value="">All Types</option>
-                <option value="deposit">Deposit</option>
-                <option value="withdrawal">Withdrawal</option>
-                <option value="ticket_buy">Ticket Buy / Wager</option>
-                <option value="payout_win">Payout Win</option>
-                <option value="refund">Refund</option>
-              </select>
+          <form onSubmit={handleSearch} className="filter-row mb-4" style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <select
+              className="form-select"
+              style={{ width: "auto" }}
+              value={filters.type}
+              onChange={e => setFilters({ ...filters, type: e.target.value, page: 1 })}
+              aria-label="Filter by transaction type"
+            >
+              <option value="">All Types</option>
+              <option value="deposit">Deposit</option>
+              <option value="withdrawal">Withdrawal</option>
+              <option value="ticket_buy">Ticket Buy / Wager</option>
+              <option value="payout_win">Payout Win</option>
+              <option value="refund">Refund</option>
+              <option value="adjustment">Admin Adjustment</option>
+              <option value="referral_commission">Referral Commission</option>
+              <option value="referral_payout">Referral Payout</option>
+              <option value="referral_reversal">Referral Reversal</option>
+              <option value="demo_credit">Demo Credit</option>
+            </select>
 
-              <div className="search-input-wrapper" style={{ flex: 1, maxWidth: 360 }}>
-                <Search size={18} />
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Search player, phone, or note..."
-                  value={filters.search}
-                  onChange={e => setFilters({ ...filters, search: e.target.value, page: 1 })}
-                />
-              </div>
+            <select
+              className="form-select"
+              style={{ width: "auto" }}
+              value={filters.mode}
+              onChange={e => setFilters({ ...filters, mode: e.target.value, page: 1 })}
+              aria-label="Filter by wallet mode"
+            >
+              <option value="">All Wallets</option>
+              <option value="real">Real Wallet</option>
+              <option value="referral">Referral Wallet</option>
+              <option value="demo">Demo Wallet</option>
+            </select>
+
+            <select
+              className="form-select"
+              style={{ width: "auto" }}
+              value={filters.status}
+              onChange={e => setFilters({ ...filters, status: e.target.value, page: 1 })}
+              aria-label="Filter by transaction status"
+            >
+              <option value="">All Statuses</option>
+              <option value="completed">Completed</option>
+              <option value="pending">Pending</option>
+              <option value="reversed">Reversed</option>
+              <option value="failed">Failed</option>
+            </select>
+
+            <div className="search-input-wrapper" style={{ flex: "1 1 220px", maxWidth: 320 }}>
+              <Search size={18} />
+              <input
+                type="text"
+                className="form-input"
+                placeholder="Search player, phone, TX ID, or note..."
+                value={filters.search}
+                onChange={e => setFilters({ ...filters, search: e.target.value })}
+              />
             </div>
-          </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <input
+                type="date"
+                className="form-input"
+                value={filters.dateFrom}
+                onChange={e => setFilters({ ...filters, dateFrom: e.target.value })}
+                style={{ width: 135 }}
+                title="From Date"
+                aria-label="From Date"
+              />
+              <span className="text-muted text-xs">to</span>
+              <input
+                type="date"
+                className="form-input"
+                value={filters.dateTo}
+                onChange={e => setFilters({ ...filters, dateTo: e.target.value })}
+                style={{ width: 135 }}
+                title="To Date"
+                aria-label="To Date"
+              />
+            </div>
+
+            <button type="submit" className="btn btn-primary btn-sm">Filter</button>
+            {hasActiveFilters && (
+              <button type="button" className="btn btn-ghost btn-sm" onClick={handleResetFilters}>Clear</button>
+            )}
+          </form>
 
           {/* Bulk Actions Bar when 1+ selected */}
           {selectedIds.size > 0 && (
@@ -430,23 +517,34 @@ export default function Transactions() {
                           ) : (
                             <span className="text-muted">{tx.player_name || "System"}</span>
                           )}
+                          <div className="text-xs text-muted">{tx.phone_number || ""}</div>
                         </td>
 
                         {/* Type */}
                         <td>
-                          <span 
-                            className="badge badge-muted" 
-                            style={{ 
-                              border: `1px solid ${getTxColor(txType)}`, 
-                              color: getTxColor(txType) 
-                            }}
-                          >
-                            {txType}
-                          </span>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
+                            <span 
+                              className="badge badge-muted" 
+                              style={{ 
+                                border: `1px solid ${getTxColor(tx)}`, 
+                                color: getTxColor(tx) 
+                              }}
+                            >
+                              {txType}
+                            </span>
+                            <div style={{ display: "flex", gap: 4, fontSize: 10 }}>
+                              <span className="text-muted uppercase">{tx.mode || "real"}</span>
+                              {tx.status && tx.status !== "completed" && (
+                                <span style={{ color: tx.status === "reversed" || tx.status === "failed" ? "var(--danger)" : "var(--warning)", textTransform: "uppercase", fontWeight: 700 }}>
+                                  • {tx.status}
+                                </span>
+                              )}
+                            </div>
+                          </div>
                         </td>
 
                         {/* Amount */}
-                        <td className="font-bold" style={{ color: getTxColor(txType) }}>
+                        <td className="font-bold" style={{ color: getTxColor(tx) }}>
                           {tx.direction > 0 ? '+' : '-'}{parseFloat(tx.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })} ETB
                         </td>
 
