@@ -45,29 +45,44 @@ export default function GameDetail() {
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionMsg, setActionMsg] = useState(null);
+
+  const showActionMsg = (type, text) => {
+    setActionMsg({ type, text });
+    setTimeout(() => setActionMsg(null), 4000);
+  };
+
   const handleForceStart = async () => {
+    if (actionLoading) return;
     if (!window.confirm(`Force start Game #${data.game.room_number}? The draw animation and winner determination will execute immediately.`)) return;
+    setActionLoading(true);
     try {
       await api.forceStartGame(id);
+      showActionMsg("success", `Game #${data.game.room_number} draw started!`);
       fetchGame();
     } catch (err) {
-      alert(err.message || "Failed to force start game");
+      showActionMsg("error", err.message || "Failed to force start game");
+    } finally {
+      setActionLoading(false);
     }
   };
 
   const handleDelete = async () => {
+    if (actionLoading) return;
     const filled = data.game.filled_seats || 0;
     const msg = filled > 0
       ? `Game #${data.game.room_number} currently has ${filled} filled seats.\n\nDeleting this room will AUTOMATICALLY REFUND all player tickets back to their wallets. Proceed with cancellation and refund?`
       : `Are you sure you want to delete Game #${data.game.room_number}?`;
 
     if (!window.confirm(msg)) return;
+    setActionLoading(true);
     try {
       await api.deleteGame(id);
-      alert(`Game #${data.game.room_number} deleted / cancelled.`);
       navigate("/games");
     } catch (err) {
-      alert(err.message || "Failed to delete game");
+      showActionMsg("error", err.message || "Failed to delete game");
+      setActionLoading(false);
     }
   };
 
@@ -76,7 +91,7 @@ export default function GameDetail() {
     setEditModal({
       open: true,
       maxSeatsPerUser: String(g.max_seats_per_player || 2),
-      timeRemaining: "60",
+      timeRemaining: String(g.round_duration_seconds || 60),
       targetJackpot: String(g.target_jackpot || ""),
       ticketPrice: String(g.ticket_price || ""),
       submitting: false,
@@ -126,6 +141,20 @@ export default function GameDetail() {
           UUID: {game.id}
         </div>
       </div>
+
+      {actionMsg && (
+        <div className="mb-4" style={{
+          padding: "12px 16px",
+          borderRadius: "var(--radius-sm)",
+          background: actionMsg.type === "error" ? "rgba(239,68,68,0.15)" : "rgba(16,185,129,0.15)",
+          border: `1px solid ${actionMsg.type === "error" ? "var(--danger)" : "var(--success)"}`,
+          color: actionMsg.type === "error" ? "var(--danger)" : "var(--success)",
+          fontSize: 14,
+          fontWeight: 600
+        }}>
+          {actionMsg.text}
+        </div>
+      )}
 
       <div className="card mb-6">
         <div className="card-body">

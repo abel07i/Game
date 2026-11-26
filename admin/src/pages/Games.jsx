@@ -48,16 +48,21 @@ export default function Games() {
   // Toast State
   const [toast, setToast] = useState(null);
 
-  const fetchGames = () => {
+  const initialFilters = { search: "", status: "", tier: "", page: 1 };
+
+  const fetchGames = (activeFilters = filters) => {
     setLoading(true);
-    api.getGames(filters)
-      .then(res => setData(res))
+    const cleanParams = Object.fromEntries(
+      Object.entries(activeFilters).filter(([, v]) => v !== "" && v !== null && v !== undefined)
+    );
+    api.getGames(cleanParams)
+      .then(res => setData(res || { games: [], total: 0 }))
       .catch(err => showToast("error", err.message || "Failed to load games"))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
-    fetchGames();
+    fetchGames(filters);
   }, [filters.page, filters.status, filters.tier]);
 
   const showToast = (type, message) => {
@@ -68,7 +73,14 @@ export default function Games() {
   const handleSearch = (e) => {
     e.preventDefault();
     if (filters.page !== 1) setFilters({ ...filters, page: 1 });
-    else fetchGames();
+    else fetchGames(filters);
+  };
+
+  const hasActiveFilters = Boolean(filters.search || filters.status || filters.tier);
+
+  const handleResetFilters = () => {
+    setFilters(initialFilters);
+    fetchGames(initialFilters);
   };
 
   // ── Create Game ─────────────────────────────────────────────────────────────
@@ -91,16 +103,21 @@ export default function Games() {
 
     try {
       const jackpot = parseFloat(createModal.targetJackpot);
-      const size = parseInt(createModal.groupSize);
+      const size = parseInt(createModal.groupSize, 10);
+      const maxSeats = parseInt(createModal.maxSeatsPerPlayer, 10);
+      const roundSecs = parseInt(createModal.roundDurationSeconds, 10) || 60;
       if (isNaN(jackpot) || jackpot <= 0) throw new Error("Invalid target jackpot");
       if (isNaN(size) || size < 2) throw new Error("Group size must be at least 2 players");
+      if (!isNaN(maxSeats) && (maxSeats < 1 || maxSeats > size)) {
+        throw new Error(`Max seats per player must be between 1 and ${size}`);
+      }
 
       await api.createGame({
         tierCategory: createModal.tierCategory,
         targetJackpot: jackpot,
         groupSize: size,
-        maxSeatsPerPlayer: parseInt(createModal.maxSeatsPerPlayer) || null,
-        roundDurationSeconds: parseInt(createModal.roundDurationSeconds) || 60
+        maxSeatsPerPlayer: !isNaN(maxSeats) ? maxSeats : null,
+        roundDurationSeconds: roundSecs
       });
 
       showToast("success", `Game room created successfully for ${jackpot} ETB (${size} players)!`);
@@ -117,7 +134,7 @@ export default function Games() {
       open: true,
       room,
       maxSeatsPerUser: String(room.max_seats_per_player || room.maxSeatsPerUser || 2),
-      timeRemaining: "60",
+      timeRemaining: String(room.round_duration_seconds || 60),
       targetJackpot: String(room.target_jackpot || room.targetJackpot || ""),
       ticketPrice: String(room.ticket_price || room.ticketPrice || ""),
       submitting: false,
@@ -132,12 +149,12 @@ export default function Games() {
 
     try {
       const updates = {
-        maxSeatsPerUser: parseInt(editModal.maxSeatsPerUser)
+        maxSeatsPerUser: parseInt(editModal.maxSeatsPerUser, 10)
       };
       if (editModal.timeRemaining) {
-        updates.timeRemaining = parseInt(editModal.timeRemaining);
+        updates.timeRemaining = parseInt(editModal.timeRemaining, 10);
       }
-      if (editModal.room.filled_seats === 0) {
+      if ((editModal.room.filled_seats || 0) === 0) {
         if (editModal.targetJackpot) updates.targetJackpot = parseFloat(editModal.targetJackpot);
         if (editModal.ticketPrice) updates.ticketPrice = parseFloat(editModal.ticketPrice);
       }
@@ -165,7 +182,7 @@ export default function Games() {
       showToast("success", `Game #${room.room_number} deleted / refunded successfully.`);
       fetchGames();
     } catch (err) {
-      alert(err.message || "Failed to delete game");
+      showToast("error", err.message || "Failed to delete game");
     }
   };
 
@@ -177,7 +194,7 @@ export default function Games() {
       showToast("success", `Game #${room.room_number} draw started!`);
       fetchGames();
     } catch (err) {
-      alert(err.message || "Failed to force start game");
+      showToast("error", err.message || "Failed to force start game");
     }
   };
 
@@ -259,6 +276,9 @@ export default function Games() {
               <option value="gold">Gold</option>
             </select>
             <button type="submit" className="btn btn-primary btn-sm">Filter</button>
+            {hasActiveFilters && (
+              <button type="button" className="btn btn-ghost btn-sm" onClick={handleResetFilters}>Clear</button>
+            )}
           </form>
 
           {/* Table */}
@@ -362,9 +382,19 @@ export default function Games() {
                           {/* Winner */}
                           <td>
                             {g.winner_name ? (
-                              <div className="font-medium text-success flex-center gap-1">
-                                <Trophy size={14} />
-                                <span>{g.winner_name}</span>
+                              <div>
+                                <div className="font-medium text-success" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                  <Trophy size={14} />
+                                  <span>{g.winner_name}</span>
+                                  {g.winner_seat != null && (
+                                    <span className="font-mono text-xs text-muted">(#{String(g.winner_seat).padStart(2, '0')})</span>
+                                  )}
+                                </div>
+                                {g.net_winner_payout > 0 && (
+                                  <div className="text-xs text-muted font-mono">
+                                    +{parseFloat(g.net_winner_payout).toLocaleString()} ETB
+                                  </div>
+                                )}
                               </div>
                             ) : (
                               <span className="text-muted text-xs">-</span>
@@ -390,21 +420,23 @@ export default function Games() {
 
                                   <button
                                     className="btn btn-primary btn-sm"
-                                    title="Force start game"
-                                    disabled={filled < 2}
+                                    title={(g.unique_players ?? filled) < 2 ? "Need at least 2 unique players to force start" : "Force start game"}
+                                    disabled={(g.unique_players ?? filled) < 2}
                                     onClick={() => handleForceStart(g)}
                                   >
                                     <Play size={14} />
                                   </button>
-
-                                  <button
-                                    className="btn btn-danger btn-sm"
-                                    title="Delete or refund room"
-                                    onClick={() => handleDeleteGame(g)}
-                                  >
-                                    <Trash2 size={14} />
-                                  </button>
                                 </>
+                              )}
+
+                              {["open", "drawing"].includes(g.status) && (
+                                <button
+                                  className="btn btn-danger btn-sm"
+                                  title="Delete or refund room"
+                                  onClick={() => handleDeleteGame(g)}
+                                >
+                                  <Trash2 size={14} />
+                                </button>
                               )}
                             </div>
                           </td>

@@ -174,51 +174,101 @@ class RoomManager {
 
   // ─── Update an open game room ─────────────────────────────────────────────
   async updateRoom(roomId, updates = {}) {
+    const dbRes = await db.query('SELECT * FROM rooms WHERE id = $1', [roomId]);
+    if (dbRes.rows.length === 0) throw new Error('Game room not found');
+    const dbRoom = dbRes.rows[0];
+
     const room = this.rooms.get(roomId);
-    if (!room) {
-      const dbRoom = await db.query('SELECT * FROM rooms WHERE id = $1', [roomId]);
-      if (dbRoom.rows.length === 0) throw new Error('Game room not found');
-      if (dbRoom.rows[0].status !== 'open') throw new Error('Only open rooms can be updated');
-    } else if (room.status !== 'open') {
+    const activeStatus = room ? room.status : dbRoom.status;
+    if (activeStatus !== 'open') {
       throw new Error('Only open game rooms can be updated');
     }
 
     const fields = [];
     const values = [];
 
-    if (updates.timeRemaining !== undefined && room) {
-      room.timeRemaining = Math.max(1, parseInt(updates.timeRemaining));
+    if (updates.timeRemaining !== undefined && updates.timeRemaining !== '') {
+      const secs = parseInt(updates.timeRemaining, 10);
+      if (!Number.isInteger(secs) || secs < 5 || secs > 3600) {
+        throw new Error('Countdown duration must be between 5 and 3600 seconds');
+      }
+      if (room) room.timeRemaining = secs;
+      fields.push(`round_duration_seconds = $${fields.length + 1}`);
+      values.push(secs);
     }
 
-    if (updates.maxSeatsPerUser !== undefined) {
-      const quota = parseInt(updates.maxSeatsPerUser);
+    const targetSize = room ? room.groupSize : dbRoom.group_size;
+
+    if (updates.maxSeatsPerUser !== undefined && updates.maxSeatsPerUser !== '') {
+      const quota = parseInt(updates.maxSeatsPerUser, 10);
+      if (!Number.isInteger(quota) || quota < 1 || quota > targetSize) {
+        throw new Error(`Max seats per player must be between 1 and ${targetSize}`);
+      }
       if (room) room.maxSeatsPerUser = quota;
       fields.push(`max_seats_per_player = $${fields.length + 1}`);
       values.push(quota);
     }
 
-    // Only allow updating pricing/jackpot if 0 seats are filled
-    const currentFilled = room ? room.filledSeats : 0;
+    // Only allow updating pricing/jackpot if 0 seats are filled (checked against DB + memory)
+    const currentFilled = Math.max(room ? room.filledSeats : 0, parseInt(dbRoom.filled_seats, 10) || 0);
     if (currentFilled === 0) {
-      if (updates.targetJackpot !== undefined) {
+      let nextJackpot = parseFloat(dbRoom.target_jackpot);
+      let nextSize = parseInt(dbRoom.group_size, 10);
+      let nextPrice = parseFloat(dbRoom.ticket_price);
+      let pricingChanged = false;
+
+      const hasJackpotUpdate = updates.targetJackpot !== undefined && updates.targetJackpot !== '';
+      const hasSizeUpdate = updates.groupSize !== undefined && updates.groupSize !== '';
+      const hasPriceUpdate = updates.ticketPrice !== undefined && updates.ticketPrice !== '';
+
+      if (hasSizeUpdate) {
+        const size = parseInt(updates.groupSize, 10);
+        if (!Number.isInteger(size) || size < 2 || size > 500) {
+          throw new Error('Group size must be between 2 and 500');
+        }
+        nextSize = size;
+        pricingChanged = true;
+      }
+
+      if (hasJackpotUpdate) {
         const jackpot = parseFloat(updates.targetJackpot);
-        if (room) room.targetJackpot = jackpot;
-        fields.push(`target_jackpot = $${fields.length + 1}`);
-        values.push(jackpot);
+        if (!Number.isFinite(jackpot) || jackpot <= 0 || jackpot > 10000000) {
+          throw new Error('Target jackpot must be greater than 0');
+        }
+        nextJackpot = jackpot;
+        pricingChanged = true;
       }
-      if (updates.ticketPrice !== undefined) {
+
+      if (hasPriceUpdate) {
         const price = parseFloat(updates.ticketPrice);
-        if (room) room.ticketPrice = price;
-        fields.push(`ticket_price = $${fields.length + 1}`);
-        values.push(price);
+        if (!Number.isFinite(price) || price <= 0 || price > 1000000) {
+          throw new Error('Ticket price must be greater than 0');
+        }
+        nextPrice = price;
+        if (!hasJackpotUpdate) {
+          nextJackpot = parseFloat((nextPrice * nextSize).toFixed(2));
+        }
+        pricingChanged = true;
       }
-      if (updates.groupSize !== undefined) {
-        const size = parseInt(updates.groupSize);
-        if (room) room.groupSize = size;
+
+      if (pricingChanged) {
+        if (hasJackpotUpdate || hasSizeUpdate) {
+          nextPrice = parseFloat((nextJackpot / nextSize).toFixed(2));
+        }
+        if (room) {
+          room.targetJackpot = nextJackpot;
+          room.groupSize = nextSize;
+          room.ticketPrice = nextPrice;
+        }
+        fields.push(`target_jackpot = $${fields.length + 1}`);
+        values.push(nextJackpot);
         fields.push(`group_size = $${fields.length + 1}`);
-        values.push(size);
+        values.push(nextSize);
+        fields.push(`ticket_price = $${fields.length + 1}`);
+        values.push(nextPrice);
       }
-      if (updates.tierCategory !== undefined) {
+
+      if (updates.tierCategory !== undefined && ['starter', 'bronze', 'silver', 'gold'].includes(updates.tierCategory)) {
         if (room) room.tierCategory = updates.tierCategory;
         fields.push(`tier = $${fields.length + 1}`);
         values.push(updates.tierCategory);
@@ -234,16 +284,25 @@ class RoomManager {
       this.io.emit('room:state_update', this.getRoomSummaries());
     }
 
-    return room || { id: roomId, success: true };
+    return room || { ...dbRoom, id: roomId, success: true };
   }
 
   // ─── Delete / Cancel a game room ──────────────────────────────────────────
   async deleteRoom(roomId) {
+    const dbRes = await db.query('SELECT id, room_number, status FROM rooms WHERE id = $1', [roomId]);
+    if (dbRes.rows.length === 0) {
+      throw new Error('Game room not found');
+    }
+    const dbRoom = dbRes.rows[0];
+    if (!['open', 'drawing'].includes(dbRoom.status)) {
+      throw new Error(`Cannot delete or refund a game room in "${dbRoom.status}" status`);
+    }
+
     const room = this.rooms.get(roomId);
 
     // Check if tickets were purchased
     const ticketCheck = await db.query('SELECT COUNT(*) FROM tickets WHERE room_id = $1 AND is_refunded = FALSE', [roomId]);
-    const soldTickets = parseInt(ticketCheck.rows[0].count);
+    const soldTickets = parseInt(ticketCheck.rows[0].count, 10);
 
     if (soldTickets > 0) {
       // Refund all players atomically
@@ -255,7 +314,7 @@ class RoomManager {
       await referralManager.reverseCommissionsForRoom({
         client: db,
         roomId,
-        roomNumber: room?.roomNumber || roomId,
+        roomNumber: room?.roomNumber || dbRoom.room_number || roomId,
         reason: 'Room cancelled & refunded by admin',
         io: this.io
       }).catch(err => console.error('Failed to reverse referral commissions on delete:', err));
@@ -276,7 +335,7 @@ class RoomManager {
       this.io.emit('room:state_update', this.getRoomSummaries());
     }
 
-    return { success: true, refundedTickets: soldTickets };
+    return { success: true, roomNumber: dbRoom.room_number, refundedTickets: soldTickets };
   }
 
   // ─── Join a Room — Enforces limits & atomic seat allocation ────────────────

@@ -1067,14 +1067,18 @@ router.get('/games', adminMiddleware, adminReadLimiter, async (req, res) => {
     const safePage = Math.max(1, parseInt(page, 10) || 1);
     const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
     const offset = (safePage - 1) * safeLimit;
-    const cleanSearch = typeof search === 'string' ? search.trim().slice(0, 30) : '';
+    const rawSearch = typeof search === 'string' ? search.trim().slice(0, 30) : '';
+    const cleanSearch = rawSearch.replace(/^(game\s*)?#/i, '').trim();
 
     let whereClause = 'WHERE 1=1';
     const params = [];
 
     if (status) { params.push(String(status)); whereClause += ` AND r.status = $${params.length}`; }
     if (tier) { params.push(String(tier)); whereClause += ` AND r.tier = $${params.length}`; }
-    if (cleanSearch) { params.push(cleanSearch); whereClause += ` AND r.room_number::TEXT = $${params.length}`; }
+    if (cleanSearch) {
+      params.push(`%${cleanSearch}%`);
+      whereClause += ` AND r.room_number::TEXT ILIKE $${params.length}`;
+    }
 
     const countResult = await db.query(`SELECT COUNT(*) FROM rooms r ${whereClause}`, params);
 
@@ -1082,12 +1086,16 @@ router.get('/games', adminMiddleware, adminReadLimiter, async (req, res) => {
     const result = await db.query(`
       SELECT
         r.id, r.room_number, r.tier, r.target_jackpot, r.group_size,
-        r.ticket_price, r.filled_seats, r.status, r.gross_pool,
-        r.platform_fee, r.net_winner_payout, r.started_at, r.settled_at,
-        r.draw_started_at,
-        u.display_name AS winner_name
+        r.ticket_price, r.filled_seats, r.max_seats_per_player, r.round_duration_seconds,
+        r.status, r.gross_pool, r.platform_fee, r.net_winner_payout,
+        r.started_at, r.settled_at, r.draw_started_at,
+        COALESCE(u.display_name, wu.display_name) AS winner_name,
+        wt.seat_number AS winner_seat,
+        (SELECT COUNT(DISTINCT t.user_id)::int FROM tickets t WHERE t.room_id = r.id AND t.is_refunded = FALSE) AS unique_players
       FROM rooms r
       LEFT JOIN users u ON u.id = r.winner_user_id
+      LEFT JOIN tickets wt ON wt.room_id = r.id AND wt.is_winner = TRUE
+      LEFT JOIN users wu ON wu.id = wt.user_id
       ${whereClause}
       ORDER BY r.started_at DESC
       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}
@@ -1108,11 +1116,18 @@ router.get('/games', adminMiddleware, adminReadLimiter, async (req, res) => {
 router.get('/games/:id', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidUuid(id)) {
+      return res.status(400).json({ error: 'Invalid game room ID' });
+    }
     const [game, tickets] = await Promise.all([
       db.query(`
-        SELECT r.*, u.display_name AS winner_name, u.phone_number AS winner_phone
+        SELECT r.*,
+               COALESCE(u.display_name, wu.display_name) AS winner_name,
+               COALESCE(u.phone_number, wu.phone_number) AS winner_phone
         FROM rooms r
         LEFT JOIN users u ON u.id = r.winner_user_id
+        LEFT JOIN tickets wt ON wt.room_id = r.id AND wt.is_winner = TRUE
+        LEFT JOIN users wu ON wu.id = wt.user_id
         WHERE r.id = $1
       `, [id]),
       db.query(`
@@ -1136,6 +1151,9 @@ router.get('/games/:id', adminMiddleware, adminReadLimiter, async (req, res) => 
 router.post('/games/:id/refund', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const roomId = req.params.id;
+    if (!isValidUuid(roomId)) {
+      return res.status(400).json({ error: 'Invalid game room ID' });
+    }
     const roomRes = await db.query(`SELECT id, room_number, status FROM rooms WHERE id = $1`, [roomId]);
     if (roomRes.rows.length === 0) {
       return res.status(404).json({ error: 'Game room not found' });
@@ -1183,6 +1201,9 @@ router.post('/games/:id/refund', adminMiddleware, adminPrivilegedLimiter, async 
 router.post('/games/:id/force-start', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const roomId = req.params.id;
+    if (!isValidUuid(roomId)) {
+      return res.status(400).json({ error: 'Invalid game room ID' });
+    }
     const roomManager = require('./roomManager');
     const room = roomManager.rooms.get(roomId);
 
@@ -1229,6 +1250,22 @@ router.post('/games', adminMiddleware, adminPrivilegedLimiter, async (req, res) 
       return res.status(400).json({ error: 'Group size must be between 2 and 500 players' });
     }
 
+    let maxSeats = null;
+    if (maxSeatsPerPlayer !== undefined && maxSeatsPerPlayer !== null && maxSeatsPerPlayer !== '') {
+      maxSeats = parseInt(maxSeatsPerPlayer, 10);
+      if (!Number.isInteger(maxSeats) || maxSeats < 1 || maxSeats > sizeNum) {
+        return res.status(400).json({ error: `Max seats per player must be between 1 and ${sizeNum}` });
+      }
+    }
+
+    let roundSecs = 60;
+    if (roundDurationSeconds !== undefined && roundDurationSeconds !== null && roundDurationSeconds !== '') {
+      roundSecs = parseInt(roundDurationSeconds, 10);
+      if (!Number.isInteger(roundSecs) || roundSecs < 5 || roundSecs > 3600) {
+        return res.status(400).json({ error: 'Countdown duration must be between 5 and 3600 seconds' });
+      }
+    }
+
     if (!tierCategory) {
       if (jackpotNum >= 100000) tierCategory = 'gold';
       else if (jackpotNum >= 10000) tierCategory = 'silver';
@@ -1243,15 +1280,25 @@ router.post('/games', adminMiddleware, adminPrivilegedLimiter, async (req, res) 
       tierCategory,
       jackpotNum,
       sizeNum,
-      maxSeatsPerPlayer ? parseInt(maxSeatsPerPlayer, 10) : null,
-      roundDurationSeconds ? parseInt(roundDurationSeconds, 10) : 60,
+      maxSeats,
+      roundSecs,
       customTicketPrice ? parseFloat(customTicketPrice) : null
     );
+
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: req.admin.email || null,
+      action: 'create_game',
+      targetType: 'game',
+      targetIds: [room.id],
+      snapshot: [{ roomId: room.id, roomNumber: room.roomNumber, tierCategory, jackpotNum, sizeNum }],
+      req
+    });
 
     res.status(201).json({ success: true, game: room });
   } catch (err) {
     console.error('Create game error:', err);
-    res.status(400).json({ error: 'Failed to create game room' });
+    res.status(400).json({ error: err.message || 'Failed to create game room' });
   }
 });
 
@@ -1259,12 +1306,25 @@ router.post('/games', adminMiddleware, adminPrivilegedLimiter, async (req, res) 
 router.put('/games/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const roomId = req.params.id;
+    if (!isValidUuid(roomId)) {
+      return res.status(400).json({ error: 'Invalid game room ID' });
+    }
     const roomManager = require('./roomManager');
     const updated = await roomManager.updateRoom(roomId, req.body);
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: req.admin.email || null,
+      action: 'update_game',
+      targetType: 'game',
+      targetIds: [roomId],
+      snapshot: [req.body || {}],
+      req
+    });
     res.json({ success: true, game: updated });
   } catch (err) {
     console.error('Update game error:', err);
-    res.status(400).json({ error: 'Failed to update game' });
+    const status = err.message === 'Game room not found' ? 404 : 400;
+    res.status(status).json({ error: err.message || 'Failed to update game' });
   }
 });
 
@@ -1272,6 +1332,9 @@ router.put('/games/:id', adminMiddleware, adminPrivilegedLimiter, async (req, re
 router.delete('/games/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const roomId = req.params.id;
+    if (!isValidUuid(roomId)) {
+      return res.status(400).json({ error: 'Invalid game room ID' });
+    }
     const roomManager = require('./roomManager');
     const result = await roomManager.deleteRoom(roomId);
     await recordAdminAudit(db, {
@@ -1286,7 +1349,8 @@ router.delete('/games/:id', adminMiddleware, adminPrivilegedLimiter, async (req,
     res.json({ success: true, message: 'Game room deleted / refunded successfully', ...result });
   } catch (err) {
     console.error('Delete game error:', err);
-    res.status(400).json({ error: 'Failed to delete game' });
+    const status = err.message === 'Game room not found' ? 404 : 400;
+    res.status(status).json({ error: err.message || 'Failed to delete game' });
   }
 });
 
