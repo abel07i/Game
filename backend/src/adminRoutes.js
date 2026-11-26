@@ -521,12 +521,12 @@ router.get('/players', adminMiddleware, adminReadLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Invalid sort field' });
     }
 
-    let whereClause = `WHERE u.role = 'player'`;
+    let whereClause = `WHERE u.role = 'player' AND u.phone_number NOT LIKE 'del\\_%'`;
     const params = [];
 
     if (cleanSearch) {
       params.push(`%${cleanSearch}%`);
-      whereClause += ` AND (u.display_name ILIKE $${params.length} OR u.phone_number ILIKE $${params.length})`;
+      whereClause += ` AND (u.display_name ILIKE $${params.length} OR u.phone_number ILIKE $${params.length} OR COALESCE(u.invite_code, '') ILIKE $${params.length})`;
     }
     if (status === 'active') {
       whereClause += ` AND u.is_active = TRUE`;
@@ -542,22 +542,28 @@ router.get('/players', adminMiddleware, adminReadLimiter, async (req, res) => {
       whereClause += ` AND COALESCE(w.balance, 0) >= 1000`;
     }
 
+    let parsedMin = null;
     if (minBalance !== undefined && minBalance !== '') {
-      const minVal = Number(minBalance);
-      if (!Number.isFinite(minVal) || minVal < 0) {
+      parsedMin = Number(minBalance);
+      if (!Number.isFinite(parsedMin) || parsedMin < 0) {
         return res.status(400).json({ error: 'Invalid minimum balance filter' });
       }
-      params.push(minVal);
+      params.push(parsedMin);
       whereClause += ` AND COALESCE(w.balance, 0) >= $${params.length}`;
     }
 
+    let parsedMax = null;
     if (maxBalance !== undefined && maxBalance !== '') {
-      const maxVal = Number(maxBalance);
-      if (!Number.isFinite(maxVal) || maxVal < 0) {
+      parsedMax = Number(maxBalance);
+      if (!Number.isFinite(parsedMax) || parsedMax < 0) {
         return res.status(400).json({ error: 'Invalid maximum balance filter' });
       }
-      params.push(maxVal);
+      params.push(parsedMax);
       whereClause += ` AND COALESCE(w.balance, 0) <= $${params.length}`;
+    }
+
+    if (parsedMin !== null && parsedMax !== null && parsedMin > parsedMax) {
+      return res.status(400).json({ error: 'Minimum balance cannot exceed maximum balance' });
     }
 
     const orderByMap = {
@@ -577,9 +583,10 @@ router.get('/players', adminMiddleware, adminReadLimiter, async (req, res) => {
     const dataParams = [...params, limitNum, offset];
     const result = await db.query(`
       SELECT
-        u.id, u.display_name, u.phone_number, u.telegram_id, u.is_active, u.role,
+        u.id, u.display_name, u.phone_number, u.telegram_id, u.invite_code, u.is_active, u.role,
         u.created_at, u.last_login_at,
         COALESCE(w.balance, 0) AS real_balance,
+        COALESCE(rw.balance, 0) AS referral_balance,
         COALESCE(w.total_deposited, 0) AS total_deposited,
         COALESCE(w.total_withdrawn, 0) AS total_withdrawn,
         COALESCE(w.total_wagered, 0) AS total_wagered,
@@ -588,9 +595,10 @@ router.get('/players', adminMiddleware, adminReadLimiter, async (req, res) => {
         COUNT(t.id) FILTER (WHERE t.is_winner = TRUE) AS games_won
       FROM users u
       LEFT JOIN wallets w ON w.user_id = u.id AND w.mode = 'real'
+      LEFT JOIN wallets rw ON rw.user_id = u.id AND rw.mode = 'referral'
       LEFT JOIN tickets t ON t.user_id = u.id
       ${whereClause}
-      GROUP BY u.id, u.telegram_id, w.balance, w.total_deposited, w.total_withdrawn, w.total_wagered, w.total_won
+      GROUP BY u.id, u.telegram_id, u.invite_code, w.balance, rw.balance, w.total_deposited, w.total_withdrawn, w.total_wagered, w.total_won
       ORDER BY ${orderByClause}
       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}
     `, dataParams);
@@ -608,6 +616,7 @@ router.get('/players', adminMiddleware, adminReadLimiter, async (req, res) => {
 });
 
 router.post('/players', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
+  const client = await db.getClient();
   try {
     const rawPhone = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
     const rawName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
@@ -615,51 +624,85 @@ router.post('/players', adminMiddleware, adminPrivilegedLimiter, async (req, res
     const telegramId = typeof req.body?.telegramId === 'string' ? req.body.telegramId.trim() : '';
 
     const phoneNumber = sanitizePhone(rawPhone);
-    if (!phoneNumber) return res.status(400).json({ error: 'Please enter a valid phone number (digits, +, -, spaces only)' });
+    if (!phoneNumber || phoneNumber.length > 20) {
+      return res.status(400).json({ error: 'Please enter a valid phone number (8-20 chars: digits, +, -, spaces only)' });
+    }
     const displayName = sanitizeDisplayName(rawName, 50);
     if (!displayName) return res.status(400).json({ error: 'Display name must be 2-50 characters with no HTML or special sequences' });
     if (!password) return res.status(400).json({ error: 'All fields required' });
-    if (password.trim().length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    if (password.trim().length < 6 || password.length > 128) {
+      return res.status(400).json({ error: 'Password must be between 6 and 128 characters' });
+    }
+    if (telegramId && !/^\d{4,20}$/.test(telegramId)) {
+      return res.status(400).json({ error: 'Telegram ID must be a numeric user ID' });
     }
 
-    const existing = await db.query(`SELECT id FROM users WHERE phone_number = $1`, [phoneNumber]);
+    const existing = await client.query(`SELECT id FROM users WHERE phone_number = $1`, [phoneNumber]);
     if (existing.rows.length > 0) return res.status(400).json({ error: 'Phone number already registered' });
 
     if (telegramId) {
-      const telegramCheck = await db.query('SELECT id FROM users WHERE telegram_id = $1', [telegramId]);
-      if (telegramCheck.rows.length > 0)
+      const telegramCheck = await client.query('SELECT id FROM users WHERE telegram_id = $1', [telegramId]);
+      if (telegramCheck.rows.length > 0) {
         return res.status(400).json({ error: 'Telegram ID already linked to another account' });
+      }
     }
 
     const hash = await hashPassword(password);
-    const result = await db.query(`
+    await client.query('BEGIN');
+    const result = await client.query(`
       INSERT INTO users (phone_number, display_name, password_hash, role, telegram_id)
       VALUES ($1, $2, $3, 'player', $4) RETURNING id, display_name, phone_number, telegram_id, created_at
     `, [phoneNumber, displayName, hash, telegramId || null]);
 
-    await db.query(`INSERT INTO wallets (user_id, mode) VALUES ($1, 'real'), ($1, 'demo')`, [result.rows[0].id]);
-    res.json({ success: true, player: result.rows[0] });
+    const newUserId = result.rows[0].id;
+    const ownInviteCode = `EQUB-${String(newUserId).slice(0, 6).toUpperCase()}`;
+    await client.query(`UPDATE users SET invite_code = $1 WHERE id = $2`, [ownInviteCode, newUserId]);
+    await client.query(
+      `INSERT INTO wallets (user_id, mode) VALUES ($1, 'real'), ($1, 'demo'), ($1, 'referral')`,
+      [newUserId]
+    );
+    await recordAdminAudit(client, {
+      adminId: req.admin.id,
+      adminUsername: req.admin.email || null,
+      action: 'create_player',
+      targetType: 'player',
+      targetIds: [newUserId],
+      snapshot: [{ ...result.rows[0], invite_code: ownInviteCode }],
+      req
+    });
+    await client.query('COMMIT');
+    res.json({ success: true, player: { ...result.rows[0], invite_code: ownInviteCode } });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => { });
     console.error('Create player error:', err);
     res.status(500).json({ error: 'Failed to create player account' });
+  } finally {
+    client.release();
   }
 });
 
 router.put('/players/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidUuid(id)) {
+      return res.status(400).json({ error: 'Invalid player ID' });
+    }
     const rawPhone = typeof req.body?.phoneNumber === 'string' ? req.body.phoneNumber.trim() : '';
     const rawName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const telegramId = typeof req.body?.telegramId === 'string' ? req.body.telegramId.trim() : '';
 
     const phoneNumber = sanitizePhone(rawPhone);
-    if (!phoneNumber) return res.status(400).json({ error: 'Please enter a valid phone number' });
+    if (!phoneNumber || phoneNumber.length > 20) {
+      return res.status(400).json({ error: 'Please enter a valid phone number (8-20 chars)' });
+    }
     const displayName = sanitizeDisplayName(rawName, 50);
     if (!displayName) return res.status(400).json({ error: 'Display name must be 2-50 characters with no special sequences' });
-    if (password.length > 0 && password.trim().length < 6) {
-      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    if (password.length > 0 && (password.trim().length < 6 || password.length > 128)) {
+      return res.status(400).json({ error: 'New password must be between 6 and 128 characters' });
+    }
+    if (telegramId && !/^\d{4,20}$/.test(telegramId)) {
+      return res.status(400).json({ error: 'Telegram ID must be a numeric user ID' });
     }
 
     const existing = await db.query(`SELECT id FROM users WHERE phone_number = $1 AND id != $2`, [phoneNumber, id]);
@@ -667,92 +710,210 @@ router.put('/players/:id', adminMiddleware, adminPrivilegedLimiter, async (req, 
 
     if (telegramId) {
       const telegramCheck = await db.query('SELECT id FROM users WHERE telegram_id = $1 AND id != $2', [telegramId, id]);
-      if (telegramCheck.rows.length > 0)
+      if (telegramCheck.rows.length > 0) {
         return res.status(400).json({ error: 'Telegram ID already linked to another account' });
+      }
     }
 
+    let updRes;
     if (password.length > 0) {
       const hash = await hashPassword(password);
-      await db.query(`UPDATE users SET phone_number = $1, display_name = $2, password_hash = $3, telegram_id = $4, updated_at = NOW() WHERE id = $5 AND role = 'player'`, [phoneNumber, displayName, hash, telegramId || null, id]);
+      updRes = await db.query(
+        `UPDATE users SET phone_number = $1, display_name = $2, password_hash = $3, telegram_id = $4, updated_at = NOW()
+         WHERE id = $5 AND role = 'player' AND phone_number NOT LIKE 'del\\_%'
+         RETURNING id, display_name, phone_number, telegram_id`,
+        [phoneNumber, displayName, hash, telegramId || null, id]
+      );
     } else {
-      await db.query(`UPDATE users SET phone_number = $1, display_name = $2, telegram_id = $3, updated_at = NOW() WHERE id = $4 AND role = 'player'`, [phoneNumber, displayName, telegramId || null, id]);
+      updRes = await db.query(
+        `UPDATE users SET phone_number = $1, display_name = $2, telegram_id = $3, updated_at = NOW()
+         WHERE id = $4 AND role = 'player' AND phone_number NOT LIKE 'del\\_%'
+         RETURNING id, display_name, phone_number, telegram_id`,
+        [phoneNumber, displayName, telegramId || null, id]
+      );
     }
-    res.json({ success: true });
+    if (updRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Player not found' });
+    }
+    await recordAdminAudit(db, {
+      adminId: req.admin.id,
+      adminUsername: req.admin.email || null,
+      action: 'update_player',
+      targetType: 'player',
+      targetIds: [id],
+      snapshot: updRes.rows,
+      req
+    });
+    res.json({ success: true, player: updRes.rows[0] });
   } catch (err) {
     console.error('Update player error:', err);
     res.status(500).json({ error: 'Failed to update player account' });
   }
 });
 
-router.delete('/players/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const pwCheck = await verifyAdminActionPassword(req.admin.id, req.body?.confirmPassword);
-    if (!pwCheck.ok) {
-      return res.status(pwCheck.status).json({ error: pwCheck.error });
+/**
+ * Safely deletes players with zero financial/game history, or soft-archives players
+ * who have immutable ledger transactions / tickets (preserving audit integrity).
+ */
+async function deleteOrArchivePlayersTx(client, playerIds) {
+  const locked = await client.query(
+    `SELECT id, display_name, phone_number
+     FROM users
+     WHERE id = ANY($1::uuid[]) AND role = 'player' AND phone_number NOT LIKE 'del\\_%'
+     FOR UPDATE`,
+    [playerIds]
+  );
+  if (locked.rows.length === 0) {
+    return { ok: false, status: 404, error: 'Player not found' };
+  }
+
+  for (const p of locked.rows) {
+    const balRes = await client.query(
+      `SELECT COALESCE(SUM(balance), 0)::float AS total_bal
+       FROM wallets WHERE user_id = $1 AND mode IN ('real', 'referral')`,
+      [p.id]
+    );
+    const totalBal = parseFloat(balRes.rows[0]?.total_bal || 0);
+    if (totalBal > 0) {
+      return {
+        ok: false,
+        status: 400,
+        error: `Cannot delete player "${p.display_name}" with an active balance of ${totalBal.toFixed(2)} ETB. Adjust balance to 0 first.`
+      };
     }
 
-    const delRes = await db.query(
-      `DELETE FROM users WHERE id = $1 AND role = 'player' RETURNING id, display_name, phone_number`,
-      [id]
+    const pendingWdr = await client.query(
+      `SELECT 1 FROM withdrawal_requests WHERE user_id = $1 AND status = 'pending' LIMIT 1`,
+      [p.id]
     );
-    if (delRes.rowCount === 0) {
-      return res.status(404).json({ error: 'Player not found' });
+    if (pendingWdr.rowCount > 0) {
+      return {
+        ok: false,
+        status: 400,
+        error: `Cannot delete player "${p.display_name}" while they have pending withdrawal requests.`
+      };
     }
-    await recordAdminAudit(db, {
+  }
+
+  let hardDeletedCount = 0;
+  let archivedCount = 0;
+  const processed = [];
+
+  for (const p of locked.rows) {
+    const historyCheck = await client.query(
+      `SELECT
+        EXISTS (SELECT 1 FROM tickets WHERE user_id = $1) OR
+        EXISTS (SELECT 1 FROM transactions tx JOIN wallets w ON w.id = tx.wallet_id WHERE w.user_id = $1) OR
+        EXISTS (SELECT 1 FROM withdrawal_requests WHERE user_id = $1) OR
+        EXISTS (SELECT 1 FROM external_deposits WHERE user_id = $1) OR
+        EXISTS (SELECT 1 FROM referral_commissions WHERE referrer_id = $1 OR referred_user_id = $1) AS has_history`,
+      [p.id]
+    );
+    const hasHistory = Boolean(historyCheck.rows[0]?.has_history);
+
+    if (hasHistory) {
+      await client.query(
+        `UPDATE users
+         SET is_active = FALSE,
+             phone_number = 'del_' || LEFT(id::text, 8) || '_' || RIGHT(phone_number, 7),
+             telegram_id = NULL,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [p.id]
+      );
+      archivedCount++;
+      processed.push({ ...p, resolution: 'archived' });
+    } else {
+      await client.query(`DELETE FROM users WHERE id = $1 AND role = 'player'`, [p.id]);
+      hardDeletedCount++;
+      processed.push({ ...p, resolution: 'deleted' });
+    }
+  }
+
+  return { ok: true, processed, hardDeletedCount, archivedCount };
+}
+
+router.delete('/players/:id', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
+  if (!isValidUuid(req.params.id)) {
+    return res.status(400).json({ error: 'Invalid player ID' });
+  }
+  const pwCheck = await verifyAdminActionPassword(req.admin.id, req.body?.confirmPassword);
+  if (!pwCheck.ok) {
+    return res.status(pwCheck.status).json({ error: pwCheck.error });
+  }
+
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const outcome = await deleteOrArchivePlayersTx(client, [req.params.id]);
+    if (!outcome.ok) {
+      await client.query('ROLLBACK');
+      return res.status(outcome.status).json({ error: outcome.error });
+    }
+    await recordAdminAudit(client, {
       adminId: req.admin.id,
       adminUsername: pwCheck.adminName,
       action: 'delete_player',
       targetType: 'player',
-      targetIds: [id],
-      snapshot: delRes.rows,
+      targetIds: [req.params.id],
+      snapshot: outcome.processed,
       req
     });
-    res.json({ success: true });
+    await client.query('COMMIT');
+    res.json({
+      success: true,
+      archived: outcome.archivedCount > 0,
+      deleted: outcome.hardDeletedCount > 0
+    });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => { });
     console.error('Delete player error:', err);
-    res.status(400).json({ error: 'Cannot delete player. They may have active tickets or financial records.' });
+    res.status(500).json({ error: 'Failed to delete player' });
+  } finally {
+    client.release();
   }
 });
 
 router.post('/players/bulk-delete', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
+  const { ids, confirmPassword } = req.body || {};
+  const idCheck = validateUuidArray(ids, 'player IDs');
+  if (!idCheck.ok) {
+    return res.status(400).json({ error: idCheck.error });
+  }
+
+  const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
+  if (!pwCheck.ok) {
+    return res.status(pwCheck.status).json({ error: pwCheck.error });
+  }
+
   const client = await db.getClient();
   try {
-    const { ids, confirmPassword } = req.body || {};
-    const idCheck = validateUuidArray(ids, 'player IDs');
-    if (!idCheck.ok) {
-      return res.status(400).json({ error: idCheck.error });
-    }
-
-    const pwCheck = await verifyAdminActionPassword(req.admin.id, confirmPassword);
-    if (!pwCheck.ok) {
-      return res.status(pwCheck.status).json({ error: pwCheck.error });
-    }
-
     await client.query('BEGIN');
-    const delRes = await client.query(
-      `DELETE FROM users WHERE id = ANY($1::uuid[]) AND role = 'player' RETURNING id, display_name, phone_number`,
-      [idCheck.uniqueIds]
-    );
-    if (delRes.rowCount === 0) {
+    const outcome = await deleteOrArchivePlayersTx(client, idCheck.uniqueIds);
+    if (!outcome.ok) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'No matching players found to delete' });
+      return res.status(outcome.status).json({ error: outcome.error });
     }
     await recordAdminAudit(client, {
       adminId: req.admin.id,
       adminUsername: pwCheck.adminName,
       action: 'bulk_delete_players',
       targetType: 'player',
-      targetIds: delRes.rows.map(r => r.id),
-      snapshot: delRes.rows,
+      targetIds: outcome.processed.map(r => r.id),
+      snapshot: outcome.processed,
       req
     });
     await client.query('COMMIT');
-    res.json({ success: true, count: delRes.rowCount });
+    res.json({
+      success: true,
+      count: outcome.processed.length,
+      deletedCount: outcome.hardDeletedCount,
+      archivedCount: outcome.archivedCount
+    });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => { });
     console.error('Bulk delete players error:', err);
-    res.status(400).json({ error: 'Cannot delete some players. They may have active tickets or financial records.' });
+    res.status(500).json({ error: 'Failed to delete selected players' });
   } finally {
     client.release();
   }
@@ -761,9 +922,12 @@ router.post('/players/bulk-delete', adminMiddleware, adminPrivilegedLimiter, asy
 router.get('/players/:id', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidUuid(id)) {
+      return res.status(400).json({ error: 'Invalid player ID' });
+    }
     const [player, wallets, tickets, transactions] = await Promise.all([
       db.query(`
-        SELECT id, display_name, phone_number, is_active, role, created_at, last_login_at
+        SELECT id, display_name, phone_number, telegram_id, invite_code, is_active, role, created_at, last_login_at
         FROM users WHERE id = $1 AND role = 'player'
       `, [id]),
       db.query(`
@@ -805,12 +969,15 @@ router.get('/players/:id', adminMiddleware, adminReadLimiter, async (req, res) =
 router.put('/players/:id/status', adminMiddleware, adminPrivilegedLimiter, async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidUuid(id)) {
+      return res.status(400).json({ error: 'Invalid player ID' });
+    }
     const { isActive } = req.body || {};
     if (typeof isActive !== 'boolean') {
       return res.status(400).json({ error: 'isActive boolean is required' });
     }
     const upd = await db.query(
-      `UPDATE users SET is_active = $1, updated_at = NOW() WHERE id = $2 AND role = 'player' RETURNING id, display_name, is_active`,
+      `UPDATE users SET is_active = $1, updated_at = NOW() WHERE id = $2 AND role = 'player' AND phone_number NOT LIKE 'del\\_%' RETURNING id, display_name, is_active`,
       [isActive, id]
     );
     if (upd.rowCount === 0) {

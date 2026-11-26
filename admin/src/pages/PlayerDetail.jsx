@@ -58,6 +58,7 @@ export default function PlayerDetail() {
 
   const { player, wallets, tickets } = data;
   const realWallet = wallets.find(w => w.mode === "real") || { balance: 0, total_deposited: 0, total_withdrawn: 0, total_won: 0 };
+  const referralWallet = wallets.find(w => w.mode === "referral") || { balance: 0 };
 
   return (
     <div>
@@ -92,6 +93,14 @@ export default function PlayerDetail() {
                 <div className="text-sm text-muted mb-1">Last Login</div>
                 <div className="font-medium">{player.last_login_at ? new Date(player.last_login_at).toLocaleString() : 'Never'}</div>
               </div>
+              <div>
+                <div className="text-sm text-muted mb-1">Invite Code</div>
+                <div className="font-medium" style={{ fontFamily: "monospace", color: "var(--accent)" }}>{player.invite_code || '-'}</div>
+              </div>
+              <div>
+                <div className="text-sm text-muted mb-1">Telegram ID</div>
+                <div className="font-medium">{player.telegram_id || 'Not linked'}</div>
+              </div>
             </div>
 
             <div className="mt-6 pt-6 border-t" style={{ borderTop: "1px solid var(--border)" }}>
@@ -114,9 +123,17 @@ export default function PlayerDetail() {
             </button>
           </div>
           <div className="card-body">
-            <div className="mb-6">
-              <div className="text-sm text-muted mb-2">Current Balance</div>
-              <div style={{ fontSize: 32, fontWeight: 800 }}>{realWallet.balance} ETB</div>
+            <div className="mb-6" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12 }}>
+              <div>
+                <div className="text-sm text-muted mb-2">Current Balance</div>
+                <div style={{ fontSize: 32, fontWeight: 800 }}>{Number(realWallet.balance || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div className="text-sm text-muted mb-1">Referral Wallet</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--accent)" }}>
+                  {Number(referralWallet.balance || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB
+                </div>
+              </div>
             </div>
 
             <div className="grid-2 gap-4">

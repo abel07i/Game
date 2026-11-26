@@ -35,15 +35,26 @@ export default function Players() {
   
   // Bulk Selection State
   const [selectedPlayers, setSelectedPlayers] = useState([]);
+  const [toast, setToast] = useState(null);
+  const [filterError, setFilterError] = useState("");
+
+  const showToast = (type, message) => {
+    setToast({ type, message });
+    setTimeout(() => setToast(null), 4000);
+  };
 
   const fetchPlayers = (activeFilters = filters) => {
     setLoading(true);
+    setSelectedPlayers([]);
     const cleanParams = Object.fromEntries(
       Object.entries(activeFilters).filter(([, v]) => v !== "" && v !== null && v !== undefined)
     );
     api.getPlayers(cleanParams)
       .then(res => setData(res || { players: [], total: 0 }))
-      .catch(err => console.error("Failed to load players:", err))
+      .catch(err => {
+        console.error("Failed to load players:", err);
+        showToast("error", err.message || "Failed to load players");
+      })
       .finally(() => setLoading(false));
   };
 
@@ -53,8 +64,16 @@ export default function Players() {
 
   const handleSearch = (e) => {
     e.preventDefault();
-    if (filters.page !== 1) setFilters({ ...filters, page: 1 });
-    else fetchPlayers(filters);
+    setFilterError("");
+    if (filters.minBalance !== "" && filters.maxBalance !== "" && Number(filters.minBalance) > Number(filters.maxBalance)) {
+      setFilterError("Min ETB cannot exceed Max ETB.");
+      return;
+    }
+    if (filters.page !== 1) {
+      setFilters({ ...filters, page: 1 });
+    } else {
+      fetchPlayers(filters);
+    }
   };
 
   const hasActiveFilters = Boolean(
@@ -62,6 +81,7 @@ export default function Players() {
   );
 
   const handleResetFilters = () => {
+    setFilterError("");
     setFilters(initialFilters);
     fetchPlayers(initialFilters);
   };
@@ -70,8 +90,11 @@ export default function Players() {
     if (!window.confirm(`Are you sure you want to ${player.is_active ? 'block' : 'unblock'} ${player.display_name}?`)) return;
     try {
       await api.updatePlayerStatus(player.id, !player.is_active);
+      showToast("success", `${player.display_name} has been ${player.is_active ? 'blocked' : 'unblocked'}.`);
       fetchPlayers();
-    } catch (err) { alert(err.message); }
+    } catch (err) {
+      showToast("error", err.message || "Failed to update player status");
+    }
   };
 
   const handleDelete = (player) => {
@@ -92,11 +115,13 @@ export default function Players() {
     setDeleteModal(prev => ({ ...prev, submitting: true, error: "" }));
     try {
       if (deleteModal.isBulk) {
-        await api.bulkDeletePlayers({ ids: selectedPlayers, confirmPassword: deleteModal.confirmPassword });
+        const res = await api.bulkDeletePlayers({ ids: selectedPlayers, confirmPassword: deleteModal.confirmPassword });
         setSelectedPlayers([]);
+        showToast("success", `Processed ${res?.count || selectedPlayers.length} player(s) (${res?.deletedCount || 0} deleted, ${res?.archivedCount || 0} archived).`);
       } else if (deleteModal.player) {
-        await api.deletePlayer(deleteModal.player.id, deleteModal.confirmPassword);
+        const res = await api.deletePlayer(deleteModal.player.id, deleteModal.confirmPassword);
         setSelectedPlayers(prev => prev.filter(id => id !== deleteModal.player.id));
+        showToast("success", res?.archived ? `Player "${deleteModal.player.display_name}" archived (financial history preserved).` : `Player "${deleteModal.player.display_name}" permanently deleted.`);
       }
       setDeleteModal({ open: false, isBulk: false, player: null, confirmPassword: "", submitting: false, error: "" });
       fetchPlayers();
@@ -140,8 +165,10 @@ export default function Players() {
     try {
       if (editPlayerId) {
         await api.updatePlayer(editPlayerId, formData);
+        showToast("success", `Player "${formData.displayName}" updated.`);
       } else {
         await api.createPlayer(formData);
+        showToast("success", `Player "${formData.displayName}" created.`);
       }
       setModalOpen(false);
       fetchPlayers();
@@ -154,9 +181,27 @@ export default function Players() {
 
   return (
     <>
+      {toast && (
+        <div style={{
+          position: "fixed",
+          bottom: 24,
+          right: 24,
+          zIndex: 1000,
+          padding: "12px 20px",
+          borderRadius: "var(--radius-sm)",
+          background: toast.type === "error" ? "var(--danger)" : "var(--success)",
+          color: "#fff",
+          boxShadow: "0 8px 24px rgba(0,0,0,0.3)",
+          fontWeight: 600,
+          fontSize: 14
+        }}>
+          {toast.message}
+        </div>
+      )}
+
       <div className="card">
         <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div className="card-title">All Players</div>
+          <div className="card-title">All Players ({data.total})</div>
           <div style={{ display: 'flex', gap: '8px' }}>
             {selectedPlayers.length > 0 && (
               <button className="btn btn-danger btn-sm" onClick={handleBulkDelete}>
@@ -169,14 +214,14 @@ export default function Players() {
           </div>
         </div>
         <div className="card-body">
-          <form onSubmit={handleSearch} className="filter-row" style={{ display: "flex", gap: 10, marginBottom: 24, flexWrap: "wrap", alignItems: "center" }}>
+          <form onSubmit={handleSearch} className="filter-row" style={{ display: "flex", gap: 10, marginBottom: filterError ? 8 : 24, flexWrap: "wrap", alignItems: "center" }}>
             <div className="search-input-wrapper" style={{ flex: "1 1 220px", position: "relative" }}>
               <Search size={16} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
               <input
                 type="text"
                 className="form-input"
                 style={{ paddingLeft: 38, width: "100%" }}
-                placeholder="Search by name or phone..."
+                placeholder="Search by name, phone, or invite code..."
                 value={filters.search}
                 onChange={e => setFilters({ ...filters, search: e.target.value })}
               />
@@ -196,7 +241,7 @@ export default function Players() {
               className="form-select"
               style={{ width: "auto" }}
               value={filters.balanceFilter}
-              onChange={e => setFilters({ ...filters, balanceFilter: e.target.value, page: 1 })}
+              onChange={e => setFilters({ ...filters, balanceFilter: e.target.value, minBalance: "", maxBalance: "", page: 1 })}
               aria-label="Filter by balance preset"
             >
               <option value="">All Balances</option>
@@ -212,7 +257,7 @@ export default function Players() {
               style={{ width: 115 }}
               placeholder="Min ETB"
               value={filters.minBalance}
-              onChange={e => setFilters({ ...filters, minBalance: e.target.value })}
+              onChange={e => setFilters({ ...filters, minBalance: e.target.value, balanceFilter: "" })}
               aria-label="Minimum balance ETB"
             />
             <input
@@ -223,7 +268,7 @@ export default function Players() {
               style={{ width: 115 }}
               placeholder="Max ETB"
               value={filters.maxBalance}
-              onChange={e => setFilters({ ...filters, maxBalance: e.target.value })}
+              onChange={e => setFilters({ ...filters, maxBalance: e.target.value, balanceFilter: "" })}
               aria-label="Maximum balance ETB"
             />
             <select
@@ -242,6 +287,9 @@ export default function Players() {
               <button type="button" className="btn btn-ghost" onClick={handleResetFilters}>Clear</button>
             )}
           </form>
+          {filterError && (
+            <div style={{ color: "var(--danger)", fontSize: 13, marginBottom: 16 }}>{filterError}</div>
+          )}
 
           {loading ? (
             <div className="loading-overlay"><div className="spinner"></div></div>
@@ -255,6 +303,7 @@ export default function Players() {
                         type="checkbox" 
                         checked={selectedPlayers.length > 0 && selectedPlayers.length === data.players.length}
                         onChange={toggleSelectAll}
+                        aria-label="Select all players on page"
                         style={{ width: 16, height: 16, cursor: 'pointer' }}
                       />
                     </th>
@@ -277,6 +326,7 @@ export default function Players() {
                           type="checkbox"
                           checked={selectedPlayers.includes(p.id)}
                           onChange={() => toggleSelect(p.id)}
+                          aria-label={`Select ${p.display_name}`}
                           style={{ width: 16, height: 16, cursor: 'pointer' }}
                         />
                       </td>
@@ -285,13 +335,23 @@ export default function Players() {
                           <div className="avatar" style={{ width: 32, height: 32, borderRadius: "50%", background: "var(--accent-light)", color: "var(--accent)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>{(p.display_name || "U")[0].toUpperCase()}</div>
                           <div>
                             <div style={{ fontWeight: 500 }}>{p.display_name}</div>
-                            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Joined {new Date(p.created_at).toLocaleDateString()}</div>
+                            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                              Joined {new Date(p.created_at).toLocaleDateString()}
+                              {p.invite_code && <span style={{ marginLeft: 6, fontFamily: "monospace", color: "var(--accent)" }}>• {p.invite_code}</span>}
+                            </div>
                           </div>
                         </div>
                       </td>
                       <td>{p.phone_number || "-"}</td>
-                      <td style={{ fontWeight: 500 }}>{p.real_balance} ETB</td>
-                      <td>{p.total_wagered} ETB</td>
+                      <td style={{ fontWeight: 500 }}>
+                        <div>{Number(p.real_balance || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB</div>
+                        {Number(p.referral_balance || 0) > 0 && (
+                          <div style={{ fontSize: 11, color: "var(--accent)" }}>
+                            Ref: {Number(p.referral_balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB
+                          </div>
+                        )}
+                      </td>
+                      <td>{Number(p.total_wagered || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB</td>
                       <td>{p.games_played}</td>
                       <td>
                         <span className={`badge ${p.is_active ? 'badge-success' : 'badge-danger'}`}>
@@ -452,8 +512,11 @@ export default function Players() {
                 )}
                 <p className="text-secondary text-sm">
                   {deleteModal.isBulk
-                    ? `Are you sure you want to permanently delete ${selectedPlayers.length} selected player account(s)?`
-                    : `Are you sure you want to permanently delete player "${deleteModal.player?.display_name}"?`}
+                    ? `Are you sure you want to delete/archive ${selectedPlayers.length} selected player account(s)?`
+                    : `Are you sure you want to delete/archive player "${deleteModal.player?.display_name}"?`}
+                </p>
+                <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>
+                  Players with zero balance and no history are permanently removed. Players with existing games or transactions are deactivated &amp; archived to preserve financial audit records.
                 </p>
                 <AdminPasswordField
                   id="player-delete-confirm-pw"
