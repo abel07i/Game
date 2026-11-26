@@ -28,7 +28,7 @@ export default function Games() {
     targetJackpot: "500",
     groupSize: "10",
     maxSeatsPerPlayer: "2",
-    roundDurationSeconds: "60",
+    roundDurationSeconds: "600",
     submitting: false,
     error: ""
   });

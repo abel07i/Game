@@ -56,7 +56,8 @@ class RoomManager {
         groupSize: r.group_size,
         ticketPrice: parseFloat(r.ticket_price),
         filledSeats: seats.length,
-        timeRemaining: Math.max(1, parseInt(r.seconds_remaining) || 60),
+        roundDurationSeconds: 600,
+        timeRemaining: Math.max(1, parseInt(r.seconds_remaining, 10) || 600),
         maxSeatsPerUser: r.max_seats_per_player,
         status: r.status,
         createdAt: r.started_at || r.created_at || new Date().toISOString(),
@@ -109,42 +110,48 @@ class RoomManager {
         });
       }
 
-      // Check if all spaces are filled: game only begins when all seats are filled!
+      // Check if all spaces are filled or 10-minute wait timer has elapsed
       if (room.filledSeats >= room.groupSize) {
         if (uniquePlayers >= 2) {
           console.log(`⚡ All spaces filled for Game #${room.roomNumber} (${room.filledSeats}/${room.groupSize} seats). Starting game!`);
-          this.startRoomGame(roomId);
+          this.startRoomGame(roomId, false, false);
         } else {
           console.log(`⏳ Game #${room.roomNumber} all seats filled but waiting for ≥2 distinct players.`);
         }
       } else if (room.timeRemaining <= 0) {
-        // All spaces are not filled yet: do NOT begin, keep waiting for players to fill all seats
-        room.timeRemaining = 60; // Reset wait cycle
-        console.log(`⏳ Game #${room.roomNumber} waiting for all spaces to be filled (${room.filledSeats}/${room.groupSize} filled).`);
-        if (this.io) {
-          this.io.emit('room:waiting_for_players', {
-            roomId,
-            roomNumber: room.roomNumber,
-            filledSeats: room.filledSeats,
-            groupSize: room.groupSize,
-            currentPlayers: uniquePlayers,
-            requiredSeats: room.groupSize
-          });
-          this.io.emit('room:state_update', this.getRoomSummaries());
+        if (uniquePlayers >= 2) {
+          console.log(`⏱️ Wait timer elapsed for Game #${room.roomNumber} (${room.filledSeats}/${room.groupSize} seats, ${uniquePlayers} players). Auto-starting with joined players!`);
+          this.startRoomGame(roomId, false, true);
+        } else {
+          // Only 1 player joined after 10 minutes: keep waiting for at least a 2nd player
+          room.timeRemaining = 60;
+          console.log(`⏳ Game #${room.roomNumber} waiting for a 2nd player (${room.filledSeats}/${room.groupSize} filled, ${uniquePlayers} player).`);
+          if (this.io) {
+            this.io.emit('room:waiting_for_players', {
+              roomId,
+              roomNumber: room.roomNumber,
+              filledSeats: room.filledSeats,
+              groupSize: room.groupSize,
+              currentPlayers: uniquePlayers,
+              requiredSeats: room.groupSize
+            });
+            this.io.emit('room:state_update', this.getRoomSummaries());
+          }
         }
       }
     }
   }
 
   // ─── Create a new game room (New Game Cycle with unique Game ID) ───────────
-  async createRoom(tierCategory, targetJackpot, groupSize, maxSeatsPerPlayer = null, roundDurationSeconds = 60, customTicketPrice = null) {
+  async createRoom(tierCategory, targetJackpot, groupSize, maxSeatsPerPlayer = null, roundDurationSeconds = 600, customTicketPrice = null) {
     const ticketPrice = customTicketPrice ? parseFloat(customTicketPrice) : parseFloat((targetJackpot / groupSize).toFixed(2));
+    const waitSeconds = parseInt(roundDurationSeconds, 10) || 600;
 
     const res = await db.query(`
       INSERT INTO rooms (tier, target_jackpot, group_size, ticket_price, max_seats_per_player, round_duration_seconds)
       VALUES ($1, $2, $3, $4, COALESCE($5, (SELECT max_seats_per_user FROM seat_quotas WHERE group_size = $3 LIMIT 1), 2), $6)
       RETURNING *
-    `, [tierCategory, targetJackpot, groupSize, ticketPrice, maxSeatsPerPlayer, roundDurationSeconds || 60]);
+    `, [tierCategory, targetJackpot, groupSize, ticketPrice, maxSeatsPerPlayer, waitSeconds]);
 
     const r = res.rows[0];
     const roomObj = {
@@ -155,7 +162,8 @@ class RoomManager {
       groupSize: r.group_size,
       ticketPrice: parseFloat(r.ticket_price),
       filledSeats: 0,
-      timeRemaining: parseInt(r.round_duration_seconds) || 60,
+      roundDurationSeconds: waitSeconds,
+      timeRemaining: waitSeconds,
       maxSeatsPerUser: r.max_seats_per_player,
       status: r.status,
       seats: [],
@@ -384,9 +392,16 @@ class RoomManager {
     const assignedSeats = result.seat_numbers;
 
     // Update in-memory cache
+    const wasEmpty = room.filledSeats === 0;
     const newSeats = assignedSeats.map(num => ({ seatNumber: num, username, userId }));
     room.filledSeats += assignedSeats.length;
     room.seats.push(...newSeats);
+
+    // Start the 10-minute wait timer when the first player joins the room
+    if (wasEmpty && room.filledSeats > 0) {
+      room.timeRemaining = room.roundDurationSeconds || 600;
+      await db.query(`UPDATE rooms SET started_at = NOW() WHERE id = $1`, [roomId]).catch(() => {});
+    }
 
     const uniquePlayers = new Set(room.seats.map(s => s.userId)).size;
 
@@ -413,13 +428,13 @@ class RoomManager {
   }
 
   // ─── Start Game: Close Joining & Immediately Open Next Game Cycle ─────────
-  async startRoomGame(roomId, force = false) {
+  async startRoomGame(roomId, force = false, allowPartial = false) {
     const room = this.rooms.get(roomId);
     if (!room || room.status !== 'open') return;
 
     // 1. Close player joining for this game
     room.status = 'drawing';
-    console.log(`🚀 Game #${room.roomNumber} started drawing!${force ? ' (forced)' : ''}`);
+    console.log(`🚀 Game #${room.roomNumber} started drawing!${force ? ' (forced)' : allowPartial ? ' (wait timer elapsed)' : ''}`);
 
     // 2. Mark room as 'drawing' in PostgreSQL
     await db.query(`UPDATE rooms SET status = 'drawing', draw_started_at = NOW() WHERE id = $1`, [roomId]);
@@ -432,17 +447,18 @@ class RoomManager {
         totalSeats: room.filledSeats,
         groupSize: room.groupSize,
         tierCategory: room.tierCategory,
-        targetJackpot: room.targetJackpot
+        targetJackpot: room.targetJackpot,
+        currentPool: parseFloat((room.ticketPrice * room.filledSeats).toFixed(2))
       });
       this.io.emit('room:state_update', this.getRoomSummaries());
     }
 
     // 5. Run draw & settlement
-    await this.resolveRoom(roomId, force);
+    await this.resolveRoom(roomId, force, allowPartial);
   }
 
-  // ─── Resolve Game: Pick Winner, Settle 15% Platform Fee, Credit Winner ────
-  async resolveRoom(roomId, force = false) {
+  // ─── Resolve Game: Pick Winner, Settle Platform Fee, Credit Winner ───────
+  async resolveRoom(roomId, force = false, allowPartial = false) {
     try {
       const room = this.rooms.get(roomId);
       if (!room) return;
@@ -463,8 +479,8 @@ class RoomManager {
         username: t.username
       }));
 
-      // Require all seats to be filled before resolving unless admin force-started
-      if (!force && dbTickets.length < room.groupSize) {
+      // Require all seats to be filled unless admin force-started or 10-minute wait timer elapsed
+      if (!force && !allowPartial && dbTickets.length < room.groupSize) {
         console.warn(`⚠️ Game #${room.roomNumber} has < all seats filled (${dbTickets.length}/${room.groupSize}). Reverting to open.`);
         room.status = 'open';
         await db.query(`UPDATE rooms SET status = 'open', draw_started_at = NULL WHERE id = $1`, [roomId]).catch(() => {});

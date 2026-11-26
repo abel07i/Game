@@ -1839,7 +1839,7 @@ export default function App() {
             filledSeats: 0,
             playerCount: 0,
             seats: [],
-            timeRemaining: 60,
+            timeRemaining: 600,
             maxSeatsPerUser: getDefaultSeatQuota(size),
             status: 'open'
         };
@@ -2370,11 +2370,19 @@ export default function App() {
                                         <span className="text-[9px] sm:text-[10px] text-white/30 font-mono">#{activeRoom.roomNumber || activeRoom.id}</span>
                                     </div>
 
-                                    <div className="flex items-baseline gap-1 sm:gap-1.5 mb-1 sm:mb-2">
+                                    <div className="flex items-baseline gap-1 sm:gap-1.5 mb-1 sm:mb-2 flex-wrap">
                                         <span className="text-xl sm:text-3xl font-black text-gold-400 tracking-tight leading-none">
-                                            {activeRoom.targetJackpot?.toLocaleString()}
+                                            {((activeRoom.filledSeats || 0) > 0
+                                                ? Math.round((activeRoom.filledSeats || 0) * (activeRoom.ticketPrice || 0))
+                                                : activeRoom.targetJackpot
+                                            )?.toLocaleString()}
                                         </span>
                                         <span className="text-[10px] sm:text-xs font-bold text-gold-500/80">{t('birLabel')}</span>
+                                        {(activeRoom.filledSeats || 0) > 0 && (activeRoom.filledSeats || 0) < activeRoom.groupSize && (
+                                            <span className="text-[9px] sm:text-[10px] text-white/40 font-medium">
+                                                / {activeRoom.targetJackpot?.toLocaleString()} {t('birLabel')}
+                                            </span>
+                                        )}
                                     </div>
 
                                     <div className="flex flex-wrap items-center gap-1 sm:gap-1.5">
@@ -2389,7 +2397,7 @@ export default function App() {
                                     </div>
                                 </div>
 
-                                {/* Right Section: Compact Circular Seat Fill Progress */}
+                                {/* Right Section: Compact Circular Seat Fill Progress & 10-min Timer */}
                                 <div className="flex flex-col items-center shrink-0 pl-2.5 sm:pl-3 border-l border-white/10">
                                     <span className="text-[8px] sm:text-[9px] font-extrabold tracking-wider text-equb-400/90 uppercase mb-0.5 sm:mb-1">
                                         {(activeRoom.filledSeats || 0) >= activeRoom.groupSize ? t('drawing') : t('nextDraw')}
@@ -2412,9 +2420,15 @@ export default function App() {
                                         </svg>
                                         <div className="relative flex flex-col items-center">
                                             <span className={`text-xs sm:text-base font-black leading-none tracking-tight font-mono transition-colors duration-300 ${(activeRoom.filledSeats || 0) >= activeRoom.groupSize ? 'text-emerald-400' : 'text-amber-400'}`}>
-                                                {activeRoom.filledSeats || 0}/{activeRoom.groupSize}
+                                                {(activeRoom.filledSeats || 0) > 0 && (activeRoom.filledSeats || 0) < activeRoom.groupSize
+                                                    ? `${Math.floor((activeRoom.timeRemaining ?? 600) / 60)}:${String((activeRoom.timeRemaining ?? 600) % 60).padStart(2, '0')}`
+                                                    : `${activeRoom.filledSeats || 0}/${activeRoom.groupSize}`}
                                             </span>
-                                            <span className="text-[7px] sm:text-[8px] text-white/50 font-bold mt-0.5">{t('secLabel')}</span>
+                                            <span className="text-[7px] sm:text-[8px] text-white/50 font-bold mt-0.5">
+                                                {(activeRoom.filledSeats || 0) > 0 && (activeRoom.filledSeats || 0) < activeRoom.groupSize
+                                                    ? `${activeRoom.filledSeats}/${activeRoom.groupSize}`
+                                                    : t('secLabel')}
+                                            </span>
                                         </div>
                                     </div>
                                     <span className="hidden sm:block text-[9px] text-white/40 mt-0.5">

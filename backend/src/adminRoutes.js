@@ -1265,7 +1265,7 @@ router.post('/games', adminMiddleware, adminPrivilegedLimiter, async (req, res) 
       }
     }
 
-    let roundSecs = 60;
+    let roundSecs = 600;
     if (roundDurationSeconds !== undefined && roundDurationSeconds !== null && roundDurationSeconds !== '') {
       roundSecs = parseInt(roundDurationSeconds, 10);
       if (!Number.isInteger(roundSecs) || roundSecs < 5 || roundSecs > 3600) {
