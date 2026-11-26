@@ -1585,22 +1585,40 @@ router.post('/transactions/bulk-delete', adminMiddleware, txMutationLimiter, asy
 
 router.get('/profit/summary', adminMiddleware, adminReadLimiter, async (req, res) => {
   try {
-    const [treasury, deposits, withdrawals, balances] = await Promise.all([
-      db.query(`SELECT COALESCE(SUM(tax_collected),0) AS platform_profit, COALESCE(SUM(gross_pool),0) AS total_wagered, COALESCE(SUM(net_paid_out),0) AS total_won FROM platform_treasury`),
-      db.query(`SELECT COALESCE(SUM(amount), 0) AS total_deposits FROM transactions WHERE tx_type = 'deposit'`),
-      db.query(`SELECT COALESCE(SUM(amount), 0) AS total_withdrawals FROM transactions WHERE tx_type = 'withdrawal'`),
-      db.query(`SELECT COALESCE(SUM(balance), 0) AS total_player_balances FROM wallets WHERE mode = 'real'`)
+    const [treasury, deposits, withdrawals, pendingWdr, balances, refBalances, refComm] = await Promise.all([
+      db.query(`SELECT COALESCE(SUM(tax_collected), 0)::float AS gross_fees, COALESCE(SUM(gross_pool), 0)::float AS total_wagered, COALESCE(SUM(net_paid_out), 0)::float AS total_won, COUNT(*)::int AS settled_games FROM platform_treasury`),
+      db.query(`SELECT COALESCE(SUM(amount), 0)::float AS total_deposits FROM transactions WHERE tx_type = 'deposit' AND status = 'completed'`),
+      db.query(`SELECT COALESCE(SUM(amount), 0)::float AS total_withdrawals FROM withdrawal_requests WHERE status = 'approved'`),
+      db.query(`SELECT COALESCE(SUM(amount), 0)::float AS pending_withdrawals, COUNT(*)::int AS pending_count FROM withdrawal_requests WHERE status = 'pending'`),
+      db.query(`SELECT COALESCE(SUM(balance), 0)::float AS real_balances FROM wallets WHERE mode = 'real'`),
+      db.query(`SELECT COALESCE(SUM(balance), 0)::float AS referral_balances FROM wallets WHERE mode = 'referral'`),
+      db.query(`SELECT COALESCE(SUM(commission_amount), 0)::float AS total_referral_commissions FROM referral_commissions WHERE status = 'credited'`)
     ]);
 
+    const grossFees = parseFloat(treasury.rows[0]?.gross_fees || 0);
+    const totalReferralCommissions = parseFloat(refComm.rows[0]?.total_referral_commissions || 0);
+    const netProfit = parseFloat((grossFees - totalReferralCommissions).toFixed(2));
+    const realBalances = parseFloat(balances.rows[0]?.real_balances || 0);
+    const referralBalances = parseFloat(refBalances.rows[0]?.referral_balances || 0);
+    const totalPlayerBalances = parseFloat((realBalances + referralBalances).toFixed(2));
+
     res.json({
-      platform_profit: treasury.rows[0].platform_profit,
-      total_wagered: treasury.rows[0].total_wagered,
-      total_won: treasury.rows[0].total_won,
-      total_deposits: deposits.rows[0].total_deposits,
-      total_withdrawals: withdrawals.rows[0].total_withdrawals,
-      total_player_balances: balances.rows[0].total_player_balances
+      gross_platform_fees: grossFees,
+      total_referral_commissions: totalReferralCommissions,
+      platform_profit: netProfit,
+      total_wagered: parseFloat(treasury.rows[0]?.total_wagered || 0),
+      total_won: parseFloat(treasury.rows[0]?.total_won || 0),
+      settled_games: treasury.rows[0]?.settled_games || 0,
+      total_deposits: parseFloat(deposits.rows[0]?.total_deposits || 0),
+      total_withdrawals: parseFloat(withdrawals.rows[0]?.total_withdrawals || 0),
+      pending_withdrawals: parseFloat(pendingWdr.rows[0]?.pending_withdrawals || 0),
+      pending_withdrawals_count: pendingWdr.rows[0]?.pending_count || 0,
+      real_player_balances: realBalances,
+      referral_player_balances: referralBalances,
+      total_player_balances: totalPlayerBalances
     });
   } catch (err) {
+    console.error('Profit summary error:', err);
     res.status(500).json({ error: 'Failed to fetch profit summary' });
   }
 });
